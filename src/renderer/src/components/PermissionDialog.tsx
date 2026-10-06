@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { PermissionModeUI, PermissionRequest } from '../../../shared/types'
 import { api } from '../api'
 import { Markdown } from './Markdown'
+import { Icon } from './Icon'
 import { describeTool } from './MessageView'
 
 interface Question {
@@ -125,7 +126,7 @@ export function PermissionDialog({ req, onDone }: { req: PermissionRequest; onDo
   if (req.toolName === 'ExitPlanMode') return <PlanApproval req={req} done={done} />
 
   const d = describeTool(req.toolName, req.input)
-  const cmd = req.input.command ?? req.input.file_path ?? req.input.url ?? req.input.pattern
+  const cmd = req.input.command ?? req.input.file_path ?? req.input.url ?? req.input.pattern ?? (d.detail || d.label)
   const respond = (allow: boolean, always = false): void => {
     void api.respond(req.sessionId, req.requestId, allow ? { behavior: 'allow', always } : { behavior: 'deny', message: denyMsg })
     done()
@@ -134,7 +135,7 @@ export function PermissionDialog({ req, onDone }: { req: PermissionRequest; onDo
   return (
     <div className="perm-card" onKeyDown={(e) => e.key === 'Escape' && respond(false)}>
       <div className="perm-title">
-        <span className="tool-icon">{d.icon}</span> {req.title ?? `Allow Claude to use ${req.displayName ?? req.toolName}?`}
+        <Icon name={d.icon} size={16} /> {req.title ?? `Allow Claude to use ${req.displayName ?? req.toolName}?`}
       </div>
       {cmd !== undefined && <pre className="tool-pre">{String(cmd)}</pre>}
       {req.decisionReason && <div className="muted small">{req.decisionReason}</div>}

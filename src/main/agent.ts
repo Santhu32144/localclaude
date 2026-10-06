@@ -8,13 +8,23 @@ import type {
   AppSettings,
   ChatMessage,
   ContentPart,
+  DiffHunk,
+  Project,
+  McpStatus,
   PermissionDecision,
   PermissionModeUI,
+  RewindPreview,
+  RewindRequest,
   SendPayload,
   SessionMeta
 } from '../shared/types'
 import { resolveClaudeBinary, subscriptionEnv } from './claude'
+import { ARTIFACT_TOOLS, createArtifactServer } from './artifacts'
+import { createComputerServer } from './computer'
 import type { SecureStore } from './store'
+
+/** forkAt value for a chat's first message: rewinding there starts a fresh transcript. */
+const FORK_START = 'start'
 
 /** Push-based async iterable used as the streaming prompt for query(). */
 class AsyncQueue<T> implements AsyncIterable<T> {
@@ -63,6 +73,10 @@ class AgentSession {
   private streaming = new Map<string, string>()
   private pending = new Map<string, PendingPermission>()
   private saveTimer?: NodeJS.Timeout
+  /** UUID of the latest top-level transcript entry seen in this turn */
+  private lastEntry?: string
+  /** whether this turn showed anything (assistant text, tools or command output) */
+  private turnHadOutput = false
 
   constructor(
     public meta: SessionMeta,
@@ -112,6 +126,14 @@ class AgentSession {
         mcpServers[name] = { type: 'stdio', command: cfg.command, args: cfg.args ?? [], env: cfg.env }
       }
     }
+    // A fresh in-process server per query: an MCP server instance serves one connection.
+    if (s.computerUse) mcpServers['computer-use'] = createComputerServer()
+    if (s.artifacts)
+      mcpServers['artifacts'] = createArtifactServer({
+        sessionId: this.meta.id,
+        store: this.store,
+        onChange: (artifact) => this.emitRaw({ type: 'artifact', sessionId: this.meta.id, artifact })
+      })
 
     this.abort = new AbortController()
     this.startedWithBypass = this.meta.permissionMode === 'bypassPermissions'
@@ -128,11 +150,16 @@ class AgentSession {
       env: subscriptionEnv(),
       pathToClaudeCodeExecutable: resolveClaudeBinary(),
       settingSources: sources,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: s.appendSystemPrompt?.trim() || undefined },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: systemAppend(s.appendSystemPrompt, this.meta.projectId ? this.store.getProject(this.meta.projectId) : undefined, this.store) },
+      // Creating artifacts only writes to LocalClaude's own storage, so it never needs a prompt.
+      allowedTools: s.artifacts ? ARTIFACT_TOOLS : undefined,
       mcpServers,
       extraArgs: s.chromeIntegration ? { chrome: null } : undefined,
       effort: s.effort || undefined,
       resume: this.meta.sdkSessionId,
+      resumeSessionAt: this.meta.sdkSessionId ? this.meta.resumeAt : undefined,
+      // Back up files before Claude edits them so any user message can be rewound to.
+      enableFileCheckpointing: true,
       abortController: this.abort,
       stderr: (d) => {
         if (process.env.LOCALCLAUDE_DEBUG) console.error('[claude]', d)
@@ -140,11 +167,12 @@ class AgentSession {
     }
   }
 
-  private ensureStarted(): void {
+  /** Start the Claude Code process. `quiet` starts it for a control request (rewind) without showing "Starting…". */
+  private ensureStarted(quiet = false): void {
     if (this.q) return
     this.queue = new AsyncQueue<SDKUserMessage>()
     this.streaming.clear()
-    this.setStatus('starting')
+    if (!quiet) this.setStatus('starting')
     const q = query({ prompt: this.queue, options: this.buildOptions() })
     this.q = q
     void this.consume(q)
@@ -192,12 +220,16 @@ class AgentSession {
     if (p.text.trim()) content.push({ type: 'text', text: p.text })
     if (!content.length) return
 
+    const uuid = randomUUID()
     const userMsg: ChatMessage = {
-      id: 'u-' + randomUUID(),
+      id: 'u-' + uuid,
       role: 'user',
       parts: [{ kind: 'text', text: p.text }],
       images: p.attachments.length || undefined,
-      ts: Date.now()
+      ts: Date.now(),
+      uuid,
+      // Unknown for chats that predate rewind support: conversation rewind is then unavailable for this message.
+      forkAt: this.meta.tip ?? (this.meta.sdkSessionId ? undefined : FORK_START)
     }
     this.emit({ type: 'message-start', sessionId: this.meta.id, message: userMsg })
     if (this.meta.title === 'New chat' && p.text.trim()) {
@@ -206,7 +238,7 @@ class AgentSession {
 
     this.ensureStarted()
     this.setStatus('running')
-    this.queue!.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null })
+    this.queue!.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, uuid: uuid as `${string}-${string}-${string}-${string}-${string}` })
   }
 
   async interrupt(): Promise<void> {
@@ -253,6 +285,144 @@ class AgentSession {
   /** Restart so changed settings (MCP servers, Chrome, effort…) apply. */
   restartIfIdle(): void {
     if (this.q && !this.running) this.shutdown()
+  }
+
+  // ---------------------------------------------------------------- context, commands, MCP
+  private refreshContext(): void {
+    this.q
+      ?.getContextUsage()
+      .then((u) =>
+        this.emitRaw({
+          type: 'context',
+          sessionId: this.meta.id,
+          usage: {
+            percentage: u.percentage,
+            totalTokens: u.totalTokens,
+            maxTokens: u.maxTokens,
+            categories: u.categories.map((c) => ({ name: c.name, tokens: c.tokens, color: c.color, kind: c.kind }))
+          }
+        })
+      )
+      .catch(() => {})
+  }
+
+  private refreshCommands(): void {
+    this.q
+      ?.supportedCommands()
+      .then((cmds) => this.emitCommands(cmds))
+      .catch(() => {})
+  }
+
+  private emitCommands(cmds: { name: string; description: string; argumentHint: string }[]): void {
+    this.emitRaw({
+      type: 'commands',
+      sessionId: this.meta.id,
+      commands: cmds.map((c) => ({ name: c.name, description: c.description ?? '', argumentHint: c.argumentHint ?? '' }))
+    })
+  }
+
+  refreshMcp(): void {
+    this.q
+      ?.mcpServerStatus()
+      .then((list) =>
+        this.emitRaw({
+          type: 'mcp-status',
+          sessionId: this.meta.id,
+          servers: list.map(
+            (m): McpStatus => ({
+              name: m.name,
+              status: m.status,
+              error: m.error,
+              toolCount: (m as { tools?: unknown[] }).tools?.length
+            })
+          )
+        })
+      )
+      .catch(() => {})
+  }
+
+  async toggleMcp(name: string, enabled: boolean): Promise<void> {
+    await this.q?.toggleMcpServer(name, enabled)
+    this.refreshMcp()
+  }
+
+  async reconnectMcp(name: string): Promise<void> {
+    try {
+      await this.q?.reconnectMcpServer(name)
+    } finally {
+      this.refreshMcp()
+    }
+  }
+
+  // ---------------------------------------------------------------- rewind
+  private userMessage(messageId: string): { idx: number; msg: ChatMessage } | undefined {
+    const idx = this.history.findIndex((m) => m.id === messageId && m.role === 'user')
+    return idx >= 0 ? { idx, msg: this.history[idx] } : undefined
+  }
+
+  /** What restoring files to before this message would change (nothing is modified). */
+  async rewindPreview(messageId: string): Promise<RewindPreview> {
+    const found = this.userMessage(messageId)
+    if (!found?.msg.uuid) return { canRewind: false, error: 'This message was sent before checkpoints were turned on.' }
+    if (this.running) return { canRewind: false, error: 'Wait for Claude to finish, or stop it first.' }
+    try {
+      this.ensureStarted(true)
+      const r = await this.q!.rewindFiles(found.msg.uuid, { dryRun: true })
+      return { canRewind: r.canRewind, error: r.error, filesChanged: r.filesChanged, insertions: r.insertions, deletions: r.deletions }
+    } catch (e) {
+      return { canRewind: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  /**
+   * Rewind to just before a user message: restore files Claude changed since then,
+   * drop the conversation from that message on, or both. Returns the message text
+   * so the composer can offer it again, like Claude Code's /rewind.
+   */
+  async rewind(req: RewindRequest): Promise<{ ok: boolean; error?: string; text?: string; filesChanged?: number }> {
+    const found = this.userMessage(req.messageId)
+    if (!found) return { ok: false, error: 'Message not found.' }
+    if (this.running) return { ok: false, error: 'Wait for Claude to finish, or stop it first.' }
+    const { idx, msg } = found
+    const text = msg.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')
+    let filesChanged: number | undefined
+
+    if (req.code) {
+      if (!msg.uuid) return { ok: false, error: 'This message was sent before checkpoints were turned on.' }
+      try {
+        this.ensureStarted(true)
+        // A real rewind doesn't list the files it restored, so count them with a dry run first.
+        const preview = await this.q!.rewindFiles(msg.uuid, { dryRun: true })
+        const r = await this.q!.rewindFiles(msg.uuid)
+        if (!r.canRewind) return { ok: false, error: r.error ?? 'There are no file changes to restore.' }
+        filesChanged = r.filesChanged?.length || preview.filesChanged?.length || 0
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+
+    if (req.conversation) {
+      if (!msg.forkAt) return { ok: false, error: 'This chat started before conversation rewind was available, so only code can be restored.' }
+      this.shutdown()
+      this.history = this.history.slice(0, idx)
+      this.store.saveHistory(this.meta.id, this.history)
+      if (msg.forkAt === FORK_START) this.touchMeta({ sdkSessionId: undefined, resumeAt: undefined, tip: undefined })
+      else this.touchMeta({ resumeAt: msg.forkAt, tip: msg.forkAt })
+      this.emitRaw({ type: 'history-reset', sessionId: this.meta.id, history: this.history })
+    } else if (req.code) {
+      this.emit({
+        type: 'message-start',
+        sessionId: this.meta.id,
+        message: {
+          id: 'sys-' + randomUUID(),
+          role: 'system',
+          parts: [{ kind: 'text', text: `Restored ${filesChanged} file${filesChanged === 1 ? '' : 's'} to before "${text.trim().slice(0, 60)}"` }],
+          ts: Date.now()
+        }
+      })
+      this.scheduleSave()
+    }
+    return { ok: true, text, filesChanged }
   }
 
   // ---------------------------------------------------------------- permissions
@@ -319,6 +489,8 @@ class AgentSession {
             this.touchMeta({ sdkSessionId: msg.session_id })
             this.emitRaw({ type: 'sdk-session', sessionId: sid, sdkSessionId: msg.session_id })
           }
+          // A pending conversation rewind is applied by this start; later starts resume normally.
+          if (this.meta.resumeAt) this.touchMeta({ resumeAt: undefined })
           this.emitRaw({
             type: 'init',
             sessionId: sid,
@@ -343,6 +515,19 @@ class AgentSession {
             ?.supportedModels()
             .then((m) => this.onModels(m.map((x) => ({ value: x.value, displayName: x.displayName, description: x.description }))))
             .catch(() => {})
+          this.refreshCommands()
+          this.refreshMcp()
+          this.refreshContext()
+        } else if (msg.subtype === 'commands_changed') {
+          this.emitCommands(msg.commands)
+        } else if (msg.subtype === 'local_command_output') {
+          // Output of built-in slash commands such as /model, /usage, /context
+          this.turnHadOutput = true
+          this.emit({
+            type: 'message-start',
+            sessionId: sid,
+            message: { id: 'cmd-' + (msg.uuid ?? randomUUID()), role: 'assistant', parts: [{ kind: 'text', text: msg.content }], ts: Date.now() }
+          })
         } else if (msg.subtype === 'compact_boundary') {
           this.emit({
             type: 'message-start',
@@ -389,6 +574,8 @@ class AgentSession {
       }
 
       case 'assistant': {
+        if (!msg.parent_tool_use_id && msg.uuid) this.lastEntry = msg.uuid
+        this.turnHadOutput = true
         const apiId = (msg.message as { id?: string }).id
         const id = apiId ? 'a-' + apiId : 'a-' + randomUUID()
         const existing = this.history.find((m) => m.id === id)
@@ -426,8 +613,11 @@ class AgentSession {
       }
 
       case 'user': {
+        const uuid = (msg as { uuid?: string }).uuid
+        if (!msg.parent_tool_use_id && uuid && !(msg as { isReplay?: boolean }).isReplay) this.lastEntry = uuid
         const content = msg.message.content
         if (!Array.isArray(content)) return
+        const patch = structuredPatch(msg.tool_use_result)
         for (const b of content as unknown as Record<string, unknown>[]) {
           if (b.type === 'tool_result') {
             this.emit({
@@ -435,7 +625,8 @@ class AgentSession {
               sessionId: sid,
               toolUseId: String(b.tool_use_id),
               result: toolResultToText(b.content),
-              isError: !!b.is_error
+              isError: !!b.is_error,
+              patch
             })
           }
         }
@@ -456,6 +647,15 @@ class AgentSession {
             message: { id: 'sys-' + randomUUID(), role: 'system', parts: [{ kind: 'text', text: 'Stopped.' }], ts: Date.now() }
           })
         } else if (errorText) this.emit({ type: 'error', sessionId: sid, text: friendlyError(errorText) })
+        else if (!this.turnHadOutput && msg.subtype === 'success' && msg.result?.trim()) {
+          // Some slash commands answer only through the result text.
+          this.emit({
+            type: 'message-start',
+            sessionId: sid,
+            message: { id: 'res-' + randomUUID(), role: 'assistant', parts: [{ kind: 'text', text: msg.result }], ts: Date.now() }
+          })
+        }
+        this.turnHadOutput = false
         const usage = msg.usage as { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
         this.emit({
           type: 'turn-done',
@@ -472,7 +672,9 @@ class AgentSession {
         })
         this.streaming.clear()
         this.setStatus('idle')
-        this.touchMeta({})
+        this.touchMeta(this.lastEntry ? { tip: this.lastEntry } : {})
+        this.refreshContext()
+        this.refreshMcp()
         if (this.restartAfterTurn) {
           this.restartAfterTurn = false
           this.shutdown()
@@ -494,6 +696,43 @@ class AgentSession {
         return
     }
   }
+}
+
+/** Knowledge beyond this many characters is cut off (it rides along with every turn). */
+export const PROJECT_KNOWLEDGE_LIMIT = 400_000
+
+/** Personal instructions, then the project's instructions and knowledge files. */
+export function systemAppend(personal: string, project: Project | undefined, store: Pick<SecureStore, 'loadProjectFiles'>): string | undefined {
+  const parts: string[] = []
+  if (personal?.trim()) parts.push(personal.trim())
+  if (project) {
+    const lines = [`<project name="${project.name}">`]
+    if (project.description.trim()) lines.push(`<description>${project.description.trim()}</description>`)
+    if (project.instructions.trim()) lines.push(`<instructions>\n${project.instructions.trim()}\n</instructions>`)
+    if (project.files.length) {
+      const contents = store.loadProjectFiles(project.id)
+      let budget = PROJECT_KNOWLEDGE_LIMIT
+      lines.push('<knowledge>')
+      for (const f of project.files) {
+        const text = contents[f.id] ?? ''
+        const take = text.slice(0, Math.max(0, budget))
+        budget -= take.length
+        const cut = take.length < text.length ? '\n[truncated: project knowledge limit reached]' : ''
+        lines.push(`<file name="${f.name}">\n${take}${cut}\n</file>`)
+      }
+      lines.push('</knowledge>')
+    }
+    lines.push('</project>')
+    parts.push("This chat is part of the user's project below. Follow its instructions and use its knowledge files when relevant.\n" + lines.join('\n'))
+  }
+  return parts.length ? parts.join('\n\n') : undefined
+}
+
+/** The unified-diff hunks Claude Code attaches to Edit/Write results, if any. */
+function structuredPatch(result: unknown): DiffHunk[] | undefined {
+  const p = (result as { structuredPatch?: unknown } | undefined)?.structuredPatch
+  if (!Array.isArray(p) || !p.length) return undefined
+  return p.filter((h) => h && Array.isArray(h.lines)) as DiffHunk[]
 }
 
 function zeroStats() {
@@ -534,12 +773,14 @@ export class SessionManager {
     return s
   }
 
-  create(cwd?: string): SessionMeta {
+  create(cwd?: string, projectId?: string): SessionMeta {
     const st = this.store.getSettings()
+    const project = projectId ? this.store.getProject(projectId) : undefined
     const meta: SessionMeta = {
       id: randomUUID(),
       title: 'New chat',
-      cwd: cwd || st.defaultCwd,
+      projectId: project?.id,
+      cwd: cwd || project?.cwd || st.defaultCwd,
       additionalDirs: [],
       model: st.defaultModel,
       permissionMode: st.defaultPermissionMode,
@@ -574,12 +815,29 @@ export class SessionManager {
   setDirs(id: string, dirs: string[]): void {
     this.get(id).setAdditionalDirs(dirs)
   }
-  updateMeta(id: string, patch: Partial<Pick<SessionMeta, 'title' | 'cwd'>>): SessionMeta {
+  rewindPreview(id: string, messageId: string): Promise<RewindPreview> {
+    return this.get(id).rewindPreview(messageId)
+  }
+  rewind(id: string, req: RewindRequest): ReturnType<AgentSession['rewind']> {
+    return this.get(id).rewind(req)
+  }
+  toggleMcp(id: string, name: string, enabled: boolean): Promise<void> {
+    return this.get(id).toggleMcp(name, enabled)
+  }
+  reconnectMcp(id: string, name: string): Promise<void> {
+    return this.get(id).reconnectMcp(name)
+  }
+  refreshMcp(id: string): void {
+    this.sessions.get(id)?.refreshMcp()
+  }
+  updateMeta(id: string, patch: Partial<Pick<SessionMeta, 'title' | 'cwd' | 'pinned' | 'projectId'>>): SessionMeta {
     const s = this.get(id)
     // The working folder can only change before the first message (the transcript is tied to it).
     if (patch.cwd && s.meta.sdkSessionId) delete patch.cwd
     s.meta = { ...s.meta, ...patch }
     this.store.upsertSession(s.meta)
+    // Moving a chat in or out of a project changes its instructions: restart Claude Code when idle.
+    if ('projectId' in patch) s.restartIfIdle()
     return s.meta
   }
   delete(id: string): void {

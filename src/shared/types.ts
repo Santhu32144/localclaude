@@ -1,6 +1,7 @@
 // Types shared between the Electron main process, preload and renderer.
 
-export type PermissionModeUI = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+/** auto = Claude Code's classifier approves or denies each action */
+export type PermissionModeUI = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions'
 
 export interface McpServerEntry {
   /** stdio */
@@ -21,11 +22,19 @@ export interface AppSettings {
   effort: '' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   /** Pass --chrome so Claude can drive your real Chrome via the Claude in Chrome extension */
   chromeIntegration: boolean
+  /** Built-in computer-use tool: screenshots + mouse/keyboard on the primary display */
+  computerUse: boolean
+  /** Claude can create artifacts (pages, apps, diagrams, documents) shown in a side panel */
+  artifacts: boolean
   /** Load ~/.claude (user) + project settings: CLAUDE.md, skills, slash commands, plugins, hooks */
   loadUserSettings: boolean
   loadProjectSettings: boolean
   mcpServers: Record<string, McpServerEntry>
   theme: 'system' | 'light' | 'dark'
+  /** font for Claude's replies */
+  replyFont: 'source-serif' | 'newsreader' | 'times' | 'georgia' | 'cambria' | 'sans'
+  /** font for your messages, the reply box and the rest of the interface */
+  uiFont: 'dm-sans' | 'system'
   /** Extra instructions appended to Claude Code's system prompt */
   appendSystemPrompt: string
 }
@@ -38,8 +47,24 @@ export interface SessionMeta {
   additionalDirs: string[]
   model: string
   permissionMode: PermissionModeUI
+  pinned?: boolean
+  /** chat belongs to this project (instructions + knowledge are added to every turn) */
+  projectId?: string
   createdAt: number
   updatedAt: number
+  /** UUID of the last transcript entry of the latest finished turn (rewind fork point) */
+  tip?: string
+  /** Pending conversation rewind: resume the transcript only up to this entry */
+  resumeAt?: string
+}
+
+/** One hunk of a unified diff, as Claude Code reports it for Edit/Write */
+export interface DiffHunk {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: string[]
 }
 
 export type ContentPart =
@@ -53,6 +78,8 @@ export type ContentPart =
       inputJsonPartial?: string
       result?: string
       isError?: boolean
+      /** structured diff from Claude Code (Edit/Write) */
+      patch?: DiffHunk[]
       done: boolean
     }
 
@@ -64,6 +91,44 @@ export interface ChatMessage {
   parentToolUseId?: string | null
   images?: number
   ts: number
+  /** user messages: the UUID sent to Claude Code (file checkpoint id) */
+  uuid?: string
+  /** user messages: transcript entry this message followed (conversation rewind point) */
+  forkAt?: string
+}
+
+export interface SlashCommandInfo {
+  name: string
+  description: string
+  argumentHint: string
+}
+
+export interface ContextUsage {
+  percentage: number
+  totalTokens: number
+  maxTokens: number
+  categories: { name: string; tokens: number; color: string; kind: string }[]
+}
+
+export interface McpStatus {
+  name: string
+  status: 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled'
+  error?: string
+  toolCount?: number
+}
+
+export interface RewindPreview {
+  canRewind: boolean
+  error?: string
+  filesChanged?: string[]
+  insertions?: number
+  deletions?: number
+}
+
+export interface RewindRequest {
+  messageId: string
+  code: boolean
+  conversation: boolean
 }
 
 export interface TurnStats {
@@ -121,7 +186,7 @@ export type AgentEvent =
   | { type: 'tool-start'; sessionId: string; messageId: string; partIndex: number; toolUseId: string; name: string }
   | { type: 'tool-input-delta'; sessionId: string; messageId: string; partIndex: number; json: string }
   | { type: 'message-final'; sessionId: string; message: ChatMessage }
-  | { type: 'tool-result'; sessionId: string; toolUseId: string; result: string; isError: boolean }
+  | { type: 'tool-result'; sessionId: string; toolUseId: string; result: string; isError: boolean; patch?: DiffHunk[] }
   | { type: 'turn-done'; sessionId: string; stats: TurnStats; isError: boolean; errorText?: string }
   | { type: 'error'; sessionId: string; text: string }
   | { type: 'rate-limit'; sessionId: string; info: RateLimitInfo }
@@ -129,6 +194,11 @@ export type AgentEvent =
   | { type: 'permission-cancel'; requestId: string }
   | { type: 'meta'; meta: SessionMeta }
   | { type: 'account'; email?: string; subscriptionType?: string }
+  | { type: 'context'; sessionId: string; usage: ContextUsage }
+  | { type: 'commands'; sessionId: string; commands: SlashCommandInfo[] }
+  | { type: 'mcp-status'; sessionId: string; servers: McpStatus[] }
+  | { type: 'history-reset'; sessionId: string; history: ChatMessage[] }
+  | { type: 'artifact'; sessionId: string; artifact: Artifact }
 
 export interface AuthStatus {
   loggedIn: boolean
@@ -173,9 +243,55 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultPermissionMode: 'default',
   effort: '',
   chromeIntegration: false,
+  computerUse: false,
+  artifacts: true,
   loadUserSettings: true,
   loadProjectSettings: true,
   mcpServers: {},
   theme: 'system',
+  replyFont: 'source-serif',
+  uiFont: 'dm-sans',
   appendSystemPrompt: ''
+}
+
+// ---------------------------------------------------------------- artifacts
+export type ArtifactType = 'html' | 'react' | 'svg' | 'markdown' | 'code' | 'mermaid'
+
+export interface ArtifactVersion {
+  content: string
+  ts: number
+}
+
+/** A standalone piece of content Claude made in a chat, kept with every version. */
+export interface Artifact {
+  id: string
+  sessionId: string
+  title: string
+  type: ArtifactType
+  /** for type "code" */
+  language?: string
+  versions: ArtifactVersion[]
+  createdAt: number
+  updatedAt: number
+}
+
+// ---------------------------------------------------------------- projects
+export interface ProjectFile {
+  id: string
+  name: string
+  size: number
+  addedAt: number
+}
+
+/** A group of chats sharing instructions, knowledge files and a working folder. */
+export interface Project {
+  id: string
+  name: string
+  description: string
+  instructions: string
+  /** working folder for new chats in this project (falls back to the default) */
+  cwd?: string
+  files: ProjectFile[]
+  createdAt: number
+  updatedAt: number
 }

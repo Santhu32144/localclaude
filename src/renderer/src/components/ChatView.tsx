@@ -1,16 +1,27 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { AppSettings, Attachment, ChatMessage, PermissionModeUI, PermissionRequest, RateLimitInfo, SessionMeta } from '../../../shared/types'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import type { AppSettings, Artifact, Attachment, ChatMessage, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, SessionMeta } from '../../../shared/types'
 import type { SessionRuntime } from '../App'
 import { api } from '../api'
-import { MessageView } from './MessageView'
+import { ArtifactPanel, type PanelState } from './ArtifactPanel'
+import { Icon } from './Icon'
+import { Menu, type MenuEntry } from './Menu'
+import { Turn, UserMessage, type TranscriptMode } from './MessageView'
 import { PermissionDialog } from './PermissionDialog'
+import { RewindDialog } from './RewindDialog'
+import { Spark } from './Spark'
+import { ContextRing, McpButton, Working } from './StatusWidgets'
 
-const MODES: { value: PermissionModeUI; label: string; hint: string }[] = [
-  { value: 'default', label: 'Ask permissions', hint: 'Claude asks before editing files or running commands' },
-  { value: 'acceptEdits', label: 'Auto-accept edits', hint: 'File edits go through; commands still ask' },
-  { value: 'plan', label: 'Plan mode', hint: 'Claude researches and proposes a plan without changing anything' },
-  { value: 'bypassPermissions', label: 'Full access', hint: 'No prompts at all. Claude can do anything on this machine.' }
+type Segment = { kind: 'user'; message: ChatMessage } | { kind: 'turn'; key: string; messages: ChatMessage[] }
+
+const MODES: { value: PermissionModeUI; label: string; short: string; hint: string }[] = [
+  { value: 'default', label: 'Ask permissions', short: 'Ask', hint: 'Claude asks before editing files or running commands' },
+  { value: 'acceptEdits', label: 'Auto-accept edits', short: 'Edits', hint: 'File edits go through; commands still ask' },
+  { value: 'plan', label: 'Plan mode', short: 'Plan', hint: 'Claude researches and proposes a plan without changing anything' },
+  { value: 'auto', label: 'Auto', short: 'Auto', hint: 'A safety classifier approves or blocks each action for you' },
+  { value: 'bypassPermissions', label: 'Full access', short: 'Full access', hint: 'No prompts at all. Claude can do anything on this machine.' }
 ]
+/** Shift+Tab cycles these, like Claude Code. Full access is only reachable from the menu. */
+const CYCLE: PermissionModeUI[] = ['default', 'acceptEdits', 'plan', 'auto']
 
 const MODEL_ALIASES = [
   { value: '', displayName: 'Default', description: "Claude Code's default for your plan" },
@@ -18,10 +29,27 @@ const MODEL_ALIASES = [
   { value: 'sonnet', displayName: 'Sonnet', description: 'Fast and capable' },
   { value: 'haiku', displayName: 'Haiku', description: 'Fastest' }
 ]
+const EFFORTS: { value: AppSettings['effort']; label: string }[] = [
+  { value: '', label: 'Default' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' }
+]
 
-function shortPath(p: string): string {
-  const parts = p.split(/[\\/]/).filter(Boolean)
-  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : p
+const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
+
+/** claude-opus-5-5 → Opus 5.5 */
+function prettyModel(id: string | undefined): string {
+  if (!id) return 'Default'
+  const m = /claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-|$|\[)/i.exec(id)
+  if (m) return `${cap(m[1])} ${m[2]}${m[3] ? '.' + m[3] : ''}`
+  return cap(id)
+}
+
+function baseName(p: string): string {
+  return p.split(/[\\/]/).filter(Boolean).pop() ?? p
 }
 
 function fileToAttachment(f: File): Promise<Attachment | null> {
@@ -50,9 +78,22 @@ export function ChatView(props: {
   permission: PermissionRequest | null
   settings: AppSettings
   rateLimit: RateLimitInfo | null
+  transcript: TranscriptMode
+  headerLeft: ReactNode
+  artifacts: Artifact[]
+  lastArtifact: { id: string; at: number } | null
+  project?: Project
+  projects: Project[]
+  onOpenProject: (id: string) => void
+  onMoveToProject: (projectId: string | undefined) => void
+  onTranscript: (m: TranscriptMode) => void
   onPermissionDone: (requestId: string) => void
   onMeta: (m: SessionMeta) => void
   onOpenSettings: (tab: string) => void
+  onSettings: (patch: Partial<AppSettings>) => Promise<void>
+  onRename: (title: string) => void
+  onPin: (pinned: boolean) => void
+  onDelete: () => void
 }) {
   const { meta, history, runtime } = props
   const [text, setText] = useState('')
@@ -60,9 +101,24 @@ export function ChatView(props: {
   const [models, setModels] = useState(MODEL_ALIASES)
   const [cmdIndex, setCmdIndex] = useState(0)
   const [dragOver, setDragOver] = useState(false)
+  const [rewind, setRewind] = useState<{ messageId: string | null } | null>(null)
+  const [escHint, setEscHint] = useState(false)
+  const [atBottom, setAtBottom] = useState(true)
+  const [renaming, setRenaming] = useState<string | null>(null)
+  const [panel, setPanel] = useState<PanelState | null>(null)
+  // Open the side panel on an artifact as soon as Claude creates or updates it.
+  useEffect(() => {
+    // (only fresh changes: reopening an old chat shouldn't pop the panel open)
+    if (props.lastArtifact && Date.now() - props.lastArtifact.at < 10_000) setPanel({ id: props.lastArtifact.id, version: null })
+  }, [props.lastArtifact])
+  const artifactInfo = (id: string) => {
+    const a = props.artifacts.find((x) => x.id === id)
+    return a && { title: a.title, type: a.type, versions: a.versions.length }
+  }
   const listRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const stick = useRef(true)
+  const lastEsc = useRef(0)
 
   const busy = runtime.status !== 'idle'
   const started = !!meta.sdkSessionId || history.length > 0
@@ -81,9 +137,14 @@ export function ChatView(props: {
   useLayoutEffect(() => {
     const el = listRef.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [history, props.permission])
+  }, [history, props.permission, busy])
 
-  // ---- subagent messages are shown inside their Agent tool card
+  const scrollToBottom = (): void => {
+    stick.current = true
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' })
+  }
+
+  // ---- subagent messages are shown inside their Agent step
   const { top, byParent } = useMemo(() => {
     const byParent = new Map<string, ChatMessage[]>()
     const top: ChatMessage[] = []
@@ -98,12 +159,32 @@ export function ChatView(props: {
   }, [history])
   const childrenOf = (id: string): ChatMessage[] => byParent.get(id) ?? []
 
-  // ---- slash commands
-  const commands = runtime.init?.slashCommands ?? []
+  // ---- your messages, and Claude's turn after each one
+  const segments = useMemo(() => {
+    const segs: Segment[] = []
+    for (const m of top) {
+      if (m.role === 'user') segs.push({ kind: 'user', message: m })
+      else {
+        const last = segs[segs.length - 1]
+        if (last?.kind === 'turn') last.messages.push(m)
+        else segs.push({ kind: 'turn', key: m.id, messages: [m] })
+      }
+    }
+    return segs
+  }, [top])
+
+  // ---- slash commands (with descriptions once Claude Code has reported them)
+  const commands = useMemo(() => {
+    if (runtime.commands?.length) return runtime.commands
+    return (runtime.init?.slashCommands ?? []).map((name) => ({ name, description: '', argumentHint: '' }))
+  }, [runtime.commands, runtime.init])
   const cmdMatches = useMemo(() => {
     const m = /^\/(\S*)$/.exec(text)
     if (!m) return []
-    return commands.filter((c) => c.toLowerCase().startsWith(m[1].toLowerCase())).slice(0, 8)
+    const q = m[1].toLowerCase()
+    const starts = commands.filter((c) => c.name.toLowerCase().startsWith(q))
+    const contains = q ? commands.filter((c) => !c.name.toLowerCase().startsWith(q) && c.name.toLowerCase().includes(q)) : []
+    return [...starts, ...contains].slice(0, 10)
   }, [text, commands])
 
   const send = async (): Promise<void> => {
@@ -112,6 +193,7 @@ export function ChatView(props: {
     stick.current = true
     setText('')
     setAttachments([])
+    if (taRef.current) taRef.current.style.height = 'auto'
     await api.send({ sessionId: meta.id, text: t, attachments })
   }
 
@@ -133,10 +215,64 @@ export function ChatView(props: {
     if (p && !meta.additionalDirs.includes(p) && p !== meta.cwd) await api.setDirs(meta.id, [...meta.additionalDirs, p])
   }
 
+  const setMode = (v: PermissionModeUI): void => {
+    if (v === 'bypassPermissions' && !confirm('Full access lets Claude edit, delete and run anything on this machine without asking. Continue?')) return
+    void api.setMode(meta.id, v)
+  }
+
+  const canRewind = top.some((m) => m.role === 'user' && (m.uuid || m.forkAt))
   const mode = MODES.find((m) => m.value === meta.permissionMode) ?? MODES[0]
   const rl = props.rateLimit
+  const modelLabel = meta.model ? (models.find((m) => m.value === meta.model)?.displayName ?? prettyModel(meta.model)) : prettyModel(runtime.init?.model)
+  const effortLabel = EFFORTS.find((e) => e.value === props.settings.effort && e.value)?.label
+
+  const titleMenu: MenuEntry[] = [
+    { key: 'rename', label: 'Rename', onSelect: () => setRenaming(meta.title) },
+    {
+      key: 'details',
+      label: props.transcript === 'verbose' ? 'Hide details' : 'Show all details',
+      hint: 'Ctrl+O',
+      onSelect: () => props.onTranscript(props.transcript === 'verbose' ? 'normal' : 'verbose')
+    },
+    { key: 'pin', label: meta.pinned ? 'Unpin' : 'Pin', onSelect: () => props.onPin(!meta.pinned) },
+    { key: 'rewind', label: 'Rewind…', hint: 'Esc Esc', disabled: !canRewind || busy, onSelect: () => setRewind({ messageId: null }) },
+    'divider',
+    { section: 'Working folder' },
+    { key: 'open', label: baseName(meta.cwd), hint: started ? 'Open' : 'Change', onSelect: () => (started ? void api.openPath(meta.cwd) : void changeFolder()) },
+    ...meta.additionalDirs.map((d) => ({ key: 'dir:' + d, label: baseName(d), hint: 'Remove', onSelect: () => void api.setDirs(meta.id, meta.additionalDirs.filter((x) => x !== d)) })),
+    { key: 'add', label: 'Add a folder…', onSelect: () => void addDir() },
+    'divider',
+    { section: 'Project' },
+    ...(props.project ? [{ key: 'proj-open', label: props.project.name, hint: 'Open project', onSelect: () => props.onOpenProject(props.project!.id) }] : []),
+    ...props.projects
+      .filter((p) => p.id !== meta.projectId)
+      .slice(0, 8)
+      .map((p) => ({ key: 'mv:' + p.id, label: 'Move to ' + p.name, onSelect: () => props.onMoveToProject(p.id) })),
+    ...(props.project ? [{ key: 'proj-remove', label: 'Remove from project', onSelect: () => props.onMoveToProject(undefined) }] : []),
+    ...(props.projects.length === 0 ? [{ key: 'proj-none', label: 'No projects yet', disabled: true, onSelect: () => {} }] : []),
+    'divider',
+    { key: 'delete', label: 'Delete chat', danger: true, onSelect: () => confirm(`Delete "${meta.title}"? This removes it from LocalClaude.`) && props.onDelete() }
+  ]
+
+  const modelMenu: MenuEntry[] = [
+    { section: 'Model' },
+    ...models.map((m) => ({ key: 'm:' + m.value, label: m.displayName, hint: m.description, checked: meta.model === m.value, onSelect: () => void api.setModel(meta.id, m.value) })),
+    'divider',
+    { section: 'Effort' },
+    ...EFFORTS.map((e) => ({ key: 'e:' + e.value, label: e.label, checked: props.settings.effort === e.value, onSelect: () => void props.onSettings({ effort: e.value }) }))
+  ]
+
+  const modeMenu: MenuEntry[] = MODES.map((m) => ({
+    key: m.value,
+    label: m.label,
+    hint: m.hint,
+    checked: meta.permissionMode === m.value,
+    danger: m.value === 'bypassPermissions',
+    onSelect: () => setMode(m.value)
+  }))
 
   return (
+    <div className={'chat-shell' + (panel ? ' with-panel' : '')}>
     <div
       className={'chat' + (dragOver ? ' drag' : '')}
       onDragOver={(e) => {
@@ -153,28 +289,70 @@ export function ChatView(props: {
         if (paths.length) void addPaths(paths)
       }}
     >
-      <header className="chat-header">
-        <div className="chat-title">{meta.title}</div>
-        <div className="folders">
+      <header className="titlebar">
+        {props.headerLeft}
+        {props.project && (
+          <>
+            <button className="link-btn crumb no-drag" onClick={() => props.onOpenProject(props.project!.id)} title="Open project">
+              {props.project.name}
+            </button>
+            <span className="muted">/</span>
+          </>
+        )}
+        {renaming !== null ? (
+          <input
+            className="input title-edit no-drag"
+            autoFocus
+            value={renaming}
+            onChange={(e) => setRenaming(e.target.value)}
+            onBlur={() => {
+              if (renaming.trim() && renaming.trim() !== meta.title) props.onRename(renaming.trim())
+              setRenaming(null)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+              if (e.key === 'Escape') setRenaming(null)
+            }}
+          />
+        ) : (
+          <Menu
+            className="no-drag title-menu"
+            title={meta.title}
+            trigger={
+              <>
+                <span className="chat-title">{meta.title}</span>
+                <span className="env" title={`Runs on this computer in ${meta.cwd}`}>
+                  <Icon name="laptop" size={16} />
+                  <span className={'env-dot' + (runtime.init ? ' on' : '')} />
+                </span>
+                <Icon name="chevronDown" size={15} className="muted" />
+              </>
+            }
+            entries={titleMenu}
+          />
+        )}
+        <div className="grow" />
+        <div className="title-actions no-drag">
           <button
-            className="chip folder"
-            title={started ? meta.cwd + ' (fixed once the chat starts)' : 'Change working folder'}
-            onClick={() => (started ? void api.openPath(meta.cwd) : void changeFolder())}
+            className={'icon-btn' + (props.settings.chromeIntegration ? ' on' : '')}
+            onClick={() => void props.onSettings({ chromeIntegration: !props.settings.chromeIntegration })}
+            title={props.settings.chromeIntegration ? 'Chrome browser is on (click to turn off)' : 'Let Claude use your Chrome browser'}
           >
-            📁 {shortPath(meta.cwd)}
+            <Icon name="globe" size={18} />
           </button>
-          {meta.additionalDirs.map((d) => (
-            <span key={d} className="chip folder" title={d}>
-              {shortPath(d)}
-              <button className="chip-x" onClick={() => void api.setDirs(meta.id, meta.additionalDirs.filter((x) => x !== d))}>
-                ×
-              </button>
-            </span>
-          ))}
-          <button className="chip ghost" onClick={() => void addDir()} title="Give Claude access to another folder">
-            ＋ folder
+          <button
+            className={'icon-btn' + (panel ? ' on' : '')}
+            onClick={() => setPanel(panel ? null : { id: null, version: null })}
+            title={props.artifacts.length ? `Artifacts (${props.artifacts.length})` : 'Artifacts'}
+          >
+            <Icon name="file" size={18} />
+          </button>
+          <button className="pill-btn" onClick={() => void api.openPath(meta.cwd)} title={meta.cwd}>
+            <Icon name="folder" size={15} />
+            {baseName(meta.cwd)}
           </button>
         </div>
+        {!panel && <div className="wco-space" />}
       </header>
 
       <div
@@ -182,54 +360,79 @@ export function ChatView(props: {
         ref={listRef}
         onScroll={(e) => {
           const el = e.currentTarget
-          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+          const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+          stick.current = bottom
+          if (bottom !== atBottom) setAtBottom(bottom)
         }}
       >
         <div className="messages-inner">
           {top.length === 0 && (
             <div className="chat-empty">
-              <div className="empty-mark">✳</div>
-              <h2>How can I help?</h2>
-              <p className="muted">
-                Working in <code>{meta.cwd}</code>. I can read and edit files here, run commands, search the web
-                {props.settings.chromeIntegration ? ', drive your Chrome browser' : ''} and use your MCP tools and skills.
+              <Spark size={40} className="welcome-spark" />
+              <h2>How can I help you today?</h2>
+              <p className="muted small">
+                Working in <code>{baseName(meta.cwd)}</code> · <code>/</code> commands · <code>@</code> files · <code>Shift+Tab</code> modes
+                {props.settings.computerUse ? ' · computer use on' : ''}
               </p>
             </div>
           )}
-          {top.map((m, i) => (
-            <MessageView key={m.id} message={m} childrenOf={childrenOf} live={busy && i === top.length - 1} />
-          ))}
-          {busy && (top.length === 0 || top[top.length - 1].role === 'user') && (
-            <div className="msg assistant">
-              <div className="working">
-                <span className="spark">✳</span> {runtime.status === 'starting' ? 'Starting Claude Code…' : 'Working…'}
-              </div>
+          {segments.map((seg, i) => {
+            if (seg.kind === 'user')
+              return <UserMessage key={seg.message.id} message={seg.message} onRewind={busy ? undefined : (id) => setRewind({ messageId: id })} />
+            const isLast = i === segments.length - 1
+            return (
+              <Turn
+                key={seg.key}
+                messages={seg.messages}
+                childrenOf={childrenOf}
+                live={busy && isLast}
+                mode={props.transcript}
+                artifactInfo={artifactInfo}
+                onOpenArtifact={(id) => setPanel({ id, version: null })}
+                footer={busy && isLast && !props.permission ? <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} /> : undefined}
+              />
+            )
+          })}
+          {busy && !props.permission && segments[segments.length - 1]?.kind !== 'turn' && (
+            <div className="turn">
+              <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} />
             </div>
           )}
         </div>
       </div>
 
       <div className="composer-wrap">
+        {!atBottom && (
+          <button className="to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
+            <Icon name="arrowDown" size={16} />
+          </button>
+        )}
         {props.permission && (
           <div className="perm-dock">
             <PermissionDialog key={props.permission.requestId} req={props.permission} onDone={props.onPermissionDone} />
           </div>
         )}
 
-        <div className="composer">
+        <div className={'composer mode-' + meta.permissionMode}>
           {cmdMatches.length > 0 && (
             <div className="cmd-popup">
               {cmdMatches.map((c, i) => (
                 <button
-                  key={c}
+                  key={c.name}
                   className={'cmd' + (i === cmdIndex % cmdMatches.length ? ' active' : '')}
                   onMouseDown={(e) => {
                     e.preventDefault()
-                    setText('/' + c + ' ')
+                    setText('/' + c.name + ' ')
                   }}
                 >
-                  /{c}
-                  {runtime.init?.skills.includes(c) && <span className="muted small"> skill</span>}
+                  <span className="cmd-name">
+                    /{c.name}
+                    {c.argumentHint && <span className="muted"> {c.argumentHint}</span>}
+                  </span>
+                  <span className="cmd-desc">
+                    {runtime.init?.skills.includes(c.name) && <span className="tag">skill</span>}
+                    {c.description}
+                  </span>
                 </button>
               ))}
             </div>
@@ -246,125 +449,152 @@ export function ChatView(props: {
               ))}
             </div>
           )}
-          <textarea
-            ref={taRef}
-            className="composer-input"
-            placeholder={busy ? 'Claude is working… (Esc to stop)' : 'Reply to Claude…  (/ for commands, @path to mention a file)'}
-            value={text}
-            rows={1}
-            onChange={(e) => {
-              setText(e.target.value)
-              setCmdIndex(0)
-              const el = e.target
-              el.style.height = 'auto'
-              el.style.height = Math.min(el.scrollHeight, 260) + 'px'
-            }}
-            onPaste={async (e) => {
-              const files = Array.from(e.clipboardData.files)
-              if (!files.length) return
-              e.preventDefault()
-              const atts = (await Promise.all(files.map(fileToAttachment))).filter(Boolean) as Attachment[]
-              setAttachments((a) => [...a, ...atts])
-            }}
-            onKeyDown={(e) => {
-              if (cmdMatches.length) {
-                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                  e.preventDefault()
-                  setCmdIndex((i) => i + (e.key === 'ArrowDown' ? 1 : cmdMatches.length - 1))
-                  return
-                }
-                if (e.key === 'Tab') {
-                  e.preventDefault()
-                  setText('/' + cmdMatches[cmdIndex % cmdMatches.length] + ' ')
-                  return
-                }
-              }
-              if (e.key === 'Escape' && busy) {
-                e.preventDefault()
-                void api.interrupt(meta.id)
-              } else if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault()
-                void send()
-              }
-            }}
-          />
-          <div className="composer-bar">
-            <button
-              className="icon-btn"
-              title="Attach files or images"
-              onClick={async () => {
-                const paths = await api.pickFiles()
-                if (paths.length) void addPaths(paths)
-              }}
-            >
-              📎
-            </button>
-            <select
-              className={'select mode-' + meta.permissionMode}
-              value={meta.permissionMode}
-              title={mode.hint}
+          <div className="prompt-row">
+            <textarea
+              ref={taRef}
+              className="composer-input"
+              placeholder={busy ? 'Claude is working… (Esc to stop)' : top.length ? 'Reply' : 'How can I help you today?'}
+              value={text}
+              rows={1}
               onChange={(e) => {
-                const v = e.target.value as PermissionModeUI
-                if (v === 'bypassPermissions' && !confirm('Full access lets Claude edit, delete and run anything on this machine without asking. Continue?'))
-                  return
-                void api.setMode(meta.id, v)
+                setText(e.target.value)
+                setCmdIndex(0)
+                const el = e.target
+                el.style.height = 'auto'
+                el.style.height = Math.min(el.scrollHeight, 260) + 'px'
               }}
-            >
-              {MODES.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-            <select className="select" value={meta.model} onChange={(e) => void api.setModel(meta.id, e.target.value)} title="Model">
-              {models.map((m) => (
-                <option key={m.value} value={m.value} title={m.description}>
-                  {m.displayName}
-                </option>
-              ))}
-              {meta.model && !models.some((m) => m.value === meta.model) && <option value={meta.model}>{meta.model}</option>}
-            </select>
-            <div className="grow" />
+              onPaste={async (e) => {
+                const files = Array.from(e.clipboardData.files)
+                if (!files.length) return
+                e.preventDefault()
+                const atts = (await Promise.all(files.map(fileToAttachment))).filter(Boolean) as Attachment[]
+                setAttachments((a) => [...a, ...atts])
+              }}
+              onKeyDown={(e) => {
+                if (cmdMatches.length) {
+                  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setCmdIndex((i) => i + (e.key === 'ArrowDown' ? 1 : cmdMatches.length - 1))
+                    return
+                  }
+                  if (e.key === 'Tab' && !e.shiftKey) {
+                    e.preventDefault()
+                    setText('/' + cmdMatches[cmdIndex % cmdMatches.length].name + ' ')
+                    return
+                  }
+                }
+                if (e.key === 'Tab' && e.shiftKey) {
+                  e.preventDefault()
+                  const i = CYCLE.indexOf(meta.permissionMode)
+                  setMode(CYCLE[(i + 1) % CYCLE.length])
+                  return
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  if (busy) return void api.interrupt(meta.id)
+                  const now = Date.now()
+                  if (now - lastEsc.current < 600 && !text && canRewind) {
+                    lastEsc.current = 0
+                    setEscHint(false)
+                    setRewind({ messageId: null })
+                  } else {
+                    lastEsc.current = now
+                    if (text) setText('')
+                    else if (canRewind) {
+                      setEscHint(true)
+                      setTimeout(() => setEscHint(false), 1200)
+                    }
+                  }
+                } else if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault()
+                  const pick = cmdMatches[cmdIndex % (cmdMatches.length || 1)]
+                  if (pick && '/' + pick.name !== text.trim()) {
+                    setText('/' + pick.name + ' ')
+                    return
+                  }
+                  void send()
+                }
+              }}
+            />
             {busy ? (
               <button className="send stop" onClick={() => void api.interrupt(meta.id)} title="Stop (Esc)">
-                ■
+                <Icon name="stop" size={14} />
               </button>
             ) : (
               <button className="send" disabled={!text.trim() && !attachments.length} onClick={() => void send()} title="Send (Enter)">
-                ↑
+                <Icon name="enter" size={18} />
               </button>
             )}
           </div>
         </div>
 
-        <div className="statusline">
-          {runtime.init && (
-            <>
-              <span title={`Claude Code ${runtime.init.claudeCodeVersion}`}>{runtime.init.model}</span>
-              {runtime.init.mcpServers.length > 0 && (
-                <button className="link-btn" onClick={() => props.onOpenSettings('tools')}>
-                  MCP: {runtime.init.mcpServers.filter((m) => m.status === 'connected').length}/{runtime.init.mcpServers.length}
-                </button>
-              )}
-              {runtime.init.skills.length > 0 && <span>{runtime.init.skills.length} skills</span>}
-              {runtime.init.apiKeySource !== 'none' && <span className="warn-text">⚠ using API key ({runtime.init.apiKeySource})</span>}
-            </>
-          )}
-          {runtime.lastStats && (
-            <span title="Estimate at API rates. On a subscription this counts toward your plan's usage limit, not billed per token.">
-              last turn: {(runtime.lastStats.outputTokens / 1000).toFixed(1)}k out · {(runtime.lastStats.durationMs / 1000).toFixed(0)}s
-            </span>
-          )}
+        <div className="composer-below">
+          <button
+            className="icon-btn"
+            title="Attach files or images"
+            onClick={async () => {
+              const paths = await api.pickFiles()
+              if (paths.length) void addPaths(paths)
+            }}
+          >
+            <Icon name="plus" size={18} />
+          </button>
+          {runtime.init && <McpButton sessionId={meta.id} servers={runtime.mcp} onOpenSettings={() => props.onOpenSettings('tools')} />}
           <div className="grow" />
-          {rl && (
-            <span className={rl.status === 'allowed' ? '' : rl.status === 'rejected' ? 'danger-text' : 'warn-text'}>
-              {rl.rateLimitType?.replace(/_/g, ' ') ?? 'usage'}
-              {rl.utilization !== undefined && `: ${Math.round(rl.utilization * (rl.utilization <= 1 ? 100 : 1))}% used`}
-              {rl.resetsAt && ` · resets ${resetLabel(rl.resetsAt)}`}
-            </span>
-          )}
+          <span className="disclaimer">{escHint ? 'Press Esc again to rewind' : 'Claude is AI and can make mistakes.'}</span>
+          <div className="grow" />
+          <ContextRing usage={runtime.context} />
+          <Menu
+            className="below-menu"
+            align="right"
+            direction="up"
+            title="Model and effort"
+            trigger={
+              <>
+                <span className="model-name">{modelLabel}</span>
+                {effortLabel && <span className="muted">{effortLabel}</span>}
+              </>
+            }
+            entries={modelMenu}
+            footer={
+              rl ? (
+                <span className={rl.status === 'allowed' ? 'muted' : rl.status === 'rejected' ? 'danger-text' : 'warn-text'}>
+                  {cap((rl.rateLimitType ?? 'usage').replace(/_/g, ' '))}
+                  {rl.utilization !== undefined && `: ${Math.round(rl.utilization * (rl.utilization <= 1 ? 100 : 1))}% used`}
+                  {rl.resetsAt && ` · resets ${resetLabel(rl.resetsAt)}`}
+                </span>
+              ) : undefined
+            }
+          />
+          <Menu
+            className={'below-menu mode-' + meta.permissionMode}
+            align="right"
+            direction="up"
+            title={mode.hint + ' (Shift+Tab to cycle)'}
+            trigger={<span>{mode.short}</span>}
+            entries={modeMenu}
+          />
         </div>
       </div>
+
+      {rewind && (
+        <RewindDialog
+          sessionId={meta.id}
+          history={history}
+          messageId={rewind.messageId}
+          onClose={() => {
+            setRewind(null)
+            taRef.current?.focus()
+          }}
+          onRestored={(t) => {
+            setRewind(null)
+            if (t !== undefined) setText(t)
+            taRef.current?.focus()
+          }}
+        />
+      )}
+    </div>
+    {panel && <ArtifactPanel sessionId={meta.id} artifacts={props.artifacts} state={panel} wcoSpace onState={setPanel} onClose={() => setPanel(null)} />}
     </div>
   )
 }

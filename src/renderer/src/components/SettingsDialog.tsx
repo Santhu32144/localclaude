@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import type { AppSettings, AuthStatus, LockStatus, McpServerEntry } from '../../../shared/types'
 import { api } from '../api'
+import { REPLY_FONTS, UI_FONTS } from '../fonts'
 
 const TABS: [string, string][] = [
   ['general', 'General'],
-  ['tools', 'Tools & browser'],
+  ['tools', 'Tools & computer'],
   ['account', 'Account & privacy'],
   ['about', 'About']
 ]
@@ -150,6 +151,7 @@ export function SettingsDialog(props: {
                   <option value="default">Ask permissions</option>
                   <option value="acceptEdits">Auto-accept edits</option>
                   <option value="plan">Plan mode</option>
+                  <option value="auto">Auto (a classifier approves actions)</option>
                   <option value="bypassPermissions">Full access (no prompts)</option>
                 </select>
               </div>
@@ -182,6 +184,33 @@ export function SettingsDialog(props: {
                 </select>
               </div>
               <div className="field">
+                <label>Fonts</label>
+                <div className="font-grid">
+                  <span className="muted small">Claude's replies</span>
+                  <select className="select" value={s.replyFont} onChange={(e) => void props.onChange({ replyFont: e.target.value as AppSettings['replyFont'] })}>
+                    {REPLY_FONTS.map((f) => (
+                      <option key={f.value} value={f.value}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="muted small">Interface and your messages</span>
+                  <select className="select" value={s.uiFont} onChange={(e) => void props.onChange({ uiFont: e.target.value as AppSettings['uiFont'] })}>
+                    {UI_FONTS.map((f) => (
+                      <option key={f.value} value={f.value}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="font-preview">
+                  <div className="font-preview-user">Can you explain what this function does?</div>
+                  <div className="font-preview-reply">
+                    It reads the config file, checks each entry, and returns the <b>first valid server</b> it finds, or <i>null</i> if none match.
+                  </div>
+                </div>
+              </div>
+              <div className="field">
                 <label>Personal instructions</label>
                 <p className="muted small">Added to every chat, like custom instructions in the Claude app.</p>
                 <textarea
@@ -198,7 +227,7 @@ export function SettingsDialog(props: {
 
           {props.tab === 'tools' && (
             <>
-              <h2>Tools & browser</h2>
+              <h2>Tools, browser & computer</h2>
               <label className="toggle">
                 <input type="checkbox" checked={s.chromeIntegration} onChange={(e) => void props.onChange({ chromeIntegration: e.target.checked })} />
                 <span>
@@ -206,6 +235,30 @@ export function SettingsDialog(props: {
                   <span className="muted small">
                     Lets Claude browse in your real Chrome with your sign-ins, through the Claude in Chrome extension (install it from the Chrome Web Store
                     and sign in with the same account).
+                  </span>
+                </span>
+              </label>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={s.computerUse}
+                  onChange={(e) => {
+                    if (
+                      e.target.checked &&
+                      !confirm(
+                        'Computer use lets Claude take screenshots of your screen and control your mouse and keyboard. Each action asks for permission unless the chat is in Full access mode. Turn it on?'
+                      )
+                    )
+                      return
+                    void props.onChange({ computerUse: e.target.checked })
+                  }}
+                />
+                <span>
+                  <b>Let Claude use this computer</b>
+                  <span className="muted small">
+                    Like computer use in the Claude app: Claude sees your primary screen and can click, scroll and type in any app. Built into LocalClaude,
+                    no extra install{info?.platform === 'linux' ? ' (Linux needs xdotool and an X11 session)' : ''}. Claude can't operate the LocalClaude
+                    window itself, so it can't approve its own permission prompts. Screenshots count toward your plan's usage.
                   </span>
                 </span>
               </label>

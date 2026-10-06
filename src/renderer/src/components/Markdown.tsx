@@ -16,10 +16,11 @@ function CodeBlock({ children, className }: { children?: ReactNode; className?: 
   const lang = /language-(\S+)/.exec(className ?? '')?.[1]
   return (
     <div className="codeblock">
-      <div className="codeblock-bar">
-        <span>{lang ?? 'text'}</span>
+      <div className="codeblock-tools">
+        {lang && <span className="codeblock-lang">{lang}</span>}
         <button
           className="icon-btn"
+          title="Copy"
           onClick={() => {
             void navigator.clipboard.writeText(textOf(children))
             setCopied(true)

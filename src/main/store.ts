@@ -1,6 +1,7 @@
 // Encrypted, machine-bound local storage.
 //
-// Two layers protect everything this app saves (settings, MCP config, chat history):
+// Two layers protect everything this app saves (settings, MCP config, chat history,
+// artifacts, projects and their knowledge files):
 //   1. AES-256-GCM with a key derived (scrypt) from this machine's OS machine id.
 //      Copy the data folder to another PC and it cannot be decrypted there.
 //   2. Electron safeStorage on top (Windows DPAPI / Linux libsecret keyring),
@@ -10,13 +11,14 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync }
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { readMachineId } from './machineId'
-import { AppSettings, ChatMessage, DEFAULT_SETTINGS, LockStatus, SessionMeta } from '../shared/types'
+import { AppSettings, Artifact, ChatMessage, DEFAULT_SETTINGS, LockStatus, Project, SessionMeta } from '../shared/types'
 
 interface Vault {
   version: 1
   machineHash: string
   settings: AppSettings
   sessions: SessionMeta[]
+  projects?: Project[]
 }
 
 const MAGIC = Buffer.from('LCV1')
@@ -26,13 +28,15 @@ export class SecureStore {
   private vaultFile = join(this.dir, 'vault.bin')
   private saltFile = join(this.dir, 'salt.bin')
   private sessionsDir = join(this.dir, 'sessions')
+  private artifactsDir = join(this.dir, 'artifacts')
+  private projectsDir = join(this.dir, 'projects')
   private key!: Buffer
   private machineHash!: string
   private vault!: Vault
   lock: LockStatus = { ok: false, encryptionBackend: 'unknown', machineIdShort: '' }
 
   open(): LockStatus {
-    mkdirSync(this.sessionsDir, { recursive: true })
+    for (const d of [this.sessionsDir, this.artifactsDir, this.projectsDir]) mkdirSync(d, { recursive: true })
     let rawId: string
     try {
       rawId = readMachineId()
@@ -154,6 +158,7 @@ export class SecureStore {
     this.vault.sessions = this.vault.sessions.filter((s) => s.id !== id)
     this.saveVault()
     rmSync(this.historyFile(id), { force: true })
+    rmSync(this.artifactsFile(id), { force: true })
   }
 
   private historyFile(id: string): string {
@@ -170,6 +175,58 @@ export class SecureStore {
   }
   saveHistory(id: string, messages: ChatMessage[]): void {
     this.atomicWrite(this.historyFile(id), this.encrypt(JSON.stringify(messages)))
+  }
+
+  // ---------- artifacts (one encrypted file per chat) ----------
+  private artifactsFile(sessionId: string): string {
+    return join(this.artifactsDir, sessionId.replace(/[^a-zA-Z0-9-]/g, '') + '.bin')
+  }
+  loadArtifacts(sessionId: string): Artifact[] {
+    return this.readJson<Artifact[]>(this.artifactsFile(sessionId), [])
+  }
+  saveArtifacts(sessionId: string, artifacts: Artifact[]): void {
+    this.atomicWrite(this.artifactsFile(sessionId), this.encrypt(JSON.stringify(artifacts)))
+  }
+
+  // ---------- projects ----------
+  listProjects(): Project[] {
+    return [...(this.vault.projects ?? [])].sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+  getProject(id: string): Project | undefined {
+    return this.vault.projects?.find((p) => p.id === id)
+  }
+  upsertProject(p: Project): void {
+    const list = (this.vault.projects ??= [])
+    const i = list.findIndex((x) => x.id === p.id)
+    if (i >= 0) list[i] = p
+    else list.push(p)
+    this.saveVault()
+  }
+  deleteProject(id: string): void {
+    this.vault.projects = (this.vault.projects ?? []).filter((p) => p.id !== id)
+    // its chats stay, they just leave the project
+    for (const s of this.vault.sessions) if (s.projectId === id) delete s.projectId
+    this.saveVault()
+    rmSync(this.projectFilesFile(id), { force: true })
+  }
+  /** Contents of a project's knowledge files, keyed by file id (kept apart from the vault: they can be large). */
+  private projectFilesFile(id: string): string {
+    return join(this.projectsDir, id.replace(/[^a-zA-Z0-9-]/g, '') + '.bin')
+  }
+  loadProjectFiles(id: string): Record<string, string> {
+    return this.readJson<Record<string, string>>(this.projectFilesFile(id), {})
+  }
+  saveProjectFiles(id: string, files: Record<string, string>): void {
+    this.atomicWrite(this.projectFilesFile(id), this.encrypt(JSON.stringify(files)))
+  }
+
+  private readJson<T>(file: string, fallback: T): T {
+    if (!existsSync(file)) return fallback
+    try {
+      return JSON.parse(this.decrypt(readFileSync(file))) as T
+    } catch {
+      return fallback
+    }
   }
 
   countHistoryFiles(): number {

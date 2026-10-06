@@ -9,6 +9,10 @@ import type {
   LoginEvent,
   PermissionDecision,
   PermissionModeUI,
+  Artifact,
+  Project,
+  RewindPreview,
+  RewindRequest,
   SendPayload,
   SessionMeta
 } from '../shared/types'
@@ -38,9 +42,9 @@ const api = {
   setSettings: (patch: Partial<AppSettings>) => inv<AppSettings>('settings:set', patch),
 
   listSessions: () => inv<SessionMeta[]>('sessions:list'),
-  createSession: (cwd?: string) => inv<SessionMeta>('sessions:create', cwd),
+  createSession: (cwd?: string, projectId?: string) => inv<SessionMeta>('sessions:create', cwd, projectId),
   deleteSession: (id: string) => inv<void>('sessions:delete', id),
-  updateSession: (id: string, patch: Partial<Pick<SessionMeta, 'title' | 'cwd'>>) => inv<SessionMeta>('sessions:update', id, patch),
+  updateSession: (id: string, patch: Partial<Pick<SessionMeta, 'title' | 'cwd' | 'pinned' | 'projectId'>>) => inv<SessionMeta>('sessions:update', id, patch),
   history: (id: string) => inv<ChatMessage[]>('sessions:history', id),
   isRunning: (id: string) => inv<boolean>('sessions:running', id),
 
@@ -52,6 +56,12 @@ const api = {
   setModel: (id: string, model: string) => inv<void>('chat:setModel', id, model),
   setDirs: (id: string, dirs: string[]) => inv<void>('chat:setDirs', id, dirs),
   listModels: () => inv<{ value: string; displayName: string; description: string }[]>('models:list'),
+  rewindPreview: (id: string, messageId: string) => inv<RewindPreview>('chat:rewindPreview', id, messageId),
+  rewind: (id: string, req: RewindRequest) =>
+    inv<{ ok: boolean; error?: string; text?: string; filesChanged?: number }>('chat:rewind', id, req),
+  toggleMcp: (id: string, name: string, enabled: boolean) => inv<void>('mcp:toggle', id, name, enabled),
+  reconnectMcp: (id: string, name: string) => inv<void>('mcp:reconnect', id, name),
+  refreshMcp: (id: string) => inv<void>('mcp:refresh', id),
   onEvent: (cb: (e: AgentEvent) => void) => on<AgentEvent>('agent:event', cb),
 
   pickFolder: (title?: string) => inv<string | null>('dialog:pickFolder', title),
@@ -60,7 +70,19 @@ const api = {
   /** Absolute path of a file dropped or pasted into the window */
   pathForFile: (f: File) => webUtils.getPathForFile(f),
   openPath: (p: string) => inv<string>('shell:openPath', p),
-  openExternal: (url: string) => inv<void>('shell:openExternal', url)
+  openExternal: (url: string) => inv<void>('shell:openExternal', url),
+  setWindowTheme: (dark: boolean) => inv<void>('window:theme', dark),
+
+  listArtifacts: (sessionId: string) => inv<Artifact[]>('artifacts:list', sessionId),
+  saveArtifact: (sessionId: string, artifactId: string, version: number) => inv<boolean>('artifacts:save', sessionId, artifactId, version),
+
+  listProjects: () => inv<Project[]>('projects:list'),
+  createProject: (input: { name: string; description?: string }) => inv<Project>('projects:create', input),
+  updateProject: (id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd'>>) => inv<Project>('projects:update', id, patch),
+  deleteProject: (id: string) => inv<void>('projects:delete', id),
+  addProjectFiles: (id: string, paths: string[]) => inv<{ project: Project; skipped: string[] }>('projects:addFiles', id, paths),
+  removeProjectFile: (id: string, fileId: string) => inv<Project>('projects:removeFile', id, fileId),
+  platform: process.platform
 }
 
 export type Api = typeof api

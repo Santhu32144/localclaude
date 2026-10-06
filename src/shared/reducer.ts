@@ -57,7 +57,7 @@ export function applyEvent(history: ChatMessage[], e: AgentEvent): ChatMessage[]
         if (p.kind !== 'tool') return p
         const prev = old.parts.find((q) => q.kind === 'tool' && q.toolUseId === p.toolUseId)
         return prev && prev.kind === 'tool' && prev.result !== undefined
-          ? { ...p, result: prev.result, isError: prev.isError, done: true }
+          ? { ...p, result: prev.result, isError: prev.isError, patch: prev.patch, done: true }
           : p
       })
       const next = history.slice()
@@ -72,7 +72,7 @@ export function applyEvent(history: ChatMessage[], e: AgentEvent): ChatMessage[]
         if (pi >= 0) {
           const next = history.slice()
           const parts = m.parts.slice()
-          parts[pi] = { ...(parts[pi] as Extract<ContentPart, { kind: 'tool' }>), result: e.result, isError: e.isError, done: true }
+          parts[pi] = { ...(parts[pi] as Extract<ContentPart, { kind: 'tool' }>), result: e.result, isError: e.isError, patch: e.patch, done: true }
           next[i] = { ...m, parts }
           return next
         }
@@ -85,6 +85,9 @@ export function applyEvent(history: ChatMessage[], e: AgentEvent): ChatMessage[]
         ...history,
         { id: 'err-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7), role: 'error', parts: [{ kind: 'text', text: e.text }], ts: Date.now() }
       ]
+
+    case 'history-reset':
+      return e.history
 
     case 'turn-done':
       // Mark any tool calls still pending as finished so spinners stop.
