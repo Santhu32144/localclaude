@@ -101,6 +101,21 @@ export const steps = [
     }
   },
   {
+    name: 'the Files changed panel lists what Claude edited',
+    run: async (c) => {
+      await c.waitFor('files button', "__t.q('.files-btn .count-badge')?.textContent === '1'")
+      await c.page("__t.click(__t.q('.files-btn'))")
+      await c.waitFor('panel', "__t.text('.files-panel').includes('app.ts') && __t.text('.files-panel .artifact-head').includes('+1')")
+      await c.page("__t.click(__t.q('.files-panel .file-card-head'))")
+      await c.waitFor('the diff', "!!__t.q('.files-panel .diff-line.add') && !!__t.q('.files-panel .diff-line.del')")
+      await c.page("__t.click(__t.byText('.files-panel .btn', 'Open in VS Code'))")
+      await c.until('opened in the editor', () => c.opened.includes('vscode://file/C:/demo/app.ts'))
+      await c.shot('files-changed')
+      await c.page(`__t.click(__t.q('.files-panel .artifact-head button[title="Close"]'))`)
+      await c.waitFor('closed', "!__t.q('.files-panel')")
+    }
+  },
+  {
     name: 'stop a running reply',
     run: async (c) => {
       await c.page("__t.setValue(__t.q('.composer-input'), 'slow please'); __t.key(__t.q('.composer-input'), 'Enter')")
@@ -430,6 +445,51 @@ export const steps = [
       await c.closeModal()
       await c.send('search knowledge for kettle', 'Knowledge: [1]')
       await c.until('saved to the vault again', () => c.list(chats).length > before)
+    }
+  },
+  {
+    name: 'Claude’s task list shows above the reply box while it works',
+    run: async (c) => {
+      await c.page("__t.setValue(__t.q('.composer-input'), 'plan tasks please'); __t.key(__t.q('.composer-input'), 'Enter')")
+      await c.waitFor('task bar', "__t.text('.task-bar').includes('Writing tests') && __t.text('.task-bar').includes('1/3')")
+      await c.page("__t.click(__t.q('.task-bar-head'))")
+      await c.waitFor('every task', "__t.qa('.task-bar .todo').length === 3")
+      await c.shot('task-bar')
+      await c.waitFor('done', "__t.qa('.turn').some((t) => t.innerText.includes('Tasks planned.')) && !__t.q('.send.stop')", 15000)
+      if (await c.page("!!__t.q('.task-bar')")) throw new Error('the task bar should go away when Claude is done')
+    }
+  },
+  {
+    name: 'git branch in the header, and a new chat in its own worktree',
+    run: async (c) => {
+      const repo = c.file('repo')
+      c.mkdir(repo)
+      c.git(repo, ['init', '-b', 'main'])
+      c.git(repo, ['config', 'user.email', 'e2e@example.com'])
+      c.git(repo, ['config', 'user.name', 'E2E'])
+      c.write(join(repo, 'a.txt'), 'one')
+      c.git(repo, ['add', '.'])
+      c.git(repo, ['commit', '-m', 'first'])
+      c.write(join(repo, 'b.txt'), 'not committed yet')
+      await c.page("__t.click(__t.q('.side-new'))")
+      await c.waitFor('new chat', "!__t.q('.msg-user') && !!__t.q('.composer-input')")
+      c.answers.push(repo)
+      await c.page("__t.click(__t.q('.title-menu .menu-trigger'))")
+      await c.menuItem('Change')
+      await c.waitFor('branch shown', "__t.text('.git-menu .menu-trigger').includes('main') && __t.text('.git-count') === '1'")
+      await c.page("__t.click(__t.q('.git-menu .menu-trigger'))")
+      await c.waitFor('changed file listed', "!!__t.byText('.menu-item', 'b.txt')")
+      await c.page("__t.key(window, 'Escape')")
+      await c.waitFor('menu closed', "!__t.q('.menu-item')")
+      await c.page("__t.click(__t.q('.title-menu .menu-trigger'))")
+      await c.menuItem('Work in a new git worktree')
+      await c.waitFor('worktree dialog', "!!__t.q('.prompt-dialog input')")
+      await c.page("__t.setValue(__t.q('.prompt-dialog input'), 'feature/e2e test')")
+      await c.page("__t.click(__t.byText('.prompt-dialog .btn', 'Create worktree'))")
+      await c.waitFor('on the new branch', "!__t.q('.prompt-dialog') && __t.text('.git-menu .menu-trigger').includes('feature/e2e-test')", 30000)
+      if (!c.exists(join(c.file('repo-worktrees'), 'feature-e2e-test', 'a.txt'))) throw new Error('the worktree folder is missing')
+      await c.send('hello worktree', 'Echo: hello worktree')
+      await c.shot('git-worktree')
     }
   }
 ]

@@ -7,6 +7,8 @@ import { backupDue, backupFileName, backupZip, createBackup, decryptBackup, encr
 import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup, readBackup } from '../src/main/exporter'
 import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
 import { createZip, readZip } from '../src/main/zip'
+import { branchName, createWorktree, gitStatus } from '../src/main/git'
+import { execFileSync } from 'node:child_process'
 import { CHAT_TOOLS, ChatIndex, chatText, createChatsServer, snippet, terms } from '../src/main/chatSearch'
 import { imageSize, referencedImages, resultImages, sniffImageType, storeImage } from '../src/main/images'
 import { docxText, extractBuffer, pptxText, xlsxText } from '../src/main/extract'
@@ -895,6 +897,32 @@ async function knowledgeAndObsidian() {
   console.log('✓ knowledge & Obsidian: PDF/Word/PowerPoint/Excel text, passages, ranking, tools, notes, linked folders, vaults, chat and memory notes')
 }
 
+async function gitHelpers() {
+  assert.equal(branchName(' fix the login bug '), 'fix-the-login-bug'); assert.equal(branchName('feature//x'), 'feature/x'); assert.equal(branchName('-x.lock'), 'x')
+  const dir = mkdtempSync(join(tmpdir(), 'lc-git-'))
+  const repo = join(dir, 'app')
+  mkdirSync(repo)
+  assert.equal(await gitStatus(repo), null, 'not a repository')
+  assert.equal(await gitStatus(join(dir, 'missing')), null)
+  const g = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })
+  g('init', '-b', 'main'); g('config', 'user.email', 't@example.com'); g('config', 'user.name', 'T')
+  writeFileSync(join(repo, 'a.txt'), 'one'); g('add', '.'); g('commit', '-m', 'first')
+  let st = (await gitStatus(repo))!
+  assert.equal(st.branch, 'main'); assert.equal(st.changed, 0); assert.equal(st.worktree, false)
+  writeFileSync(join(repo, 'new.txt'), 'x'); writeFileSync(join(repo, 'a.txt'), 'two')
+  st = (await gitStatus(repo))!
+  assert.deepEqual(st.files.map((f) => [f.status, f.path]).sort(), [['??', 'new.txt'], ['M', 'a.txt']])
+  const wt = await createWorktree(repo, 'try it')
+  assert.equal(wt.branch, 'try-it'); assert.ok(existsSync(join(wt.path, 'a.txt'))); assert.equal(basename(wt.path), 'try-it'); assert.equal(basename(join(wt.path, '..')), 'app-worktrees')
+  const ws = (await gitStatus(wt.path))!
+  assert.equal(ws.branch, 'try-it'); assert.equal(ws.worktree, true); assert.equal(ws.changed, 0, "your uncommitted changes stay in your checkout")
+  await assert.rejects(createWorktree(repo, 'try it'), /already exists/)
+  await assert.rejects(createWorktree(repo, '   '), /Choose a branch name/)
+  g('worktree', 'remove', '--force', wt.path)
+  rmSync(dir, { recursive: true, force: true })
+  console.log('✓ git: branch and changes, not a repository, worktrees on their own branch')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -939,6 +967,7 @@ await chatSearch()
 await imagesInChats()
 await backups()
 await knowledgeAndObsidian()
+await gitHelpers()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

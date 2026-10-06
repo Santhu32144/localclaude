@@ -1,19 +1,23 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { AppSettings, Artifact, Attachment, ChatMessage, ImageRef, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, SessionMeta } from '../../../shared/types'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { parsedInput } from '../../../shared/steps'
+import type { AppSettings, Artifact, Attachment, ChatMessage, GitStatus, ImageRef, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, SessionMeta } from '../../../shared/types'
 import type { SessionRuntime } from '../App'
 import { api } from '../api'
 import { allStyles } from '../../../shared/styles'
 import { ArtifactPanel, type PanelState } from './ArtifactPanel'
 import { ChoiceDialog } from './ChoiceDialog'
+import { changedFiles, FilesPanel } from './FilesPanel'
 import { FindBar } from './FindBar'
 import { Icon } from './Icon'
 import { ImagesContext, Lightbox } from './Images'
 import { Menu, type MenuEntry } from './Menu'
 import { Turn, UserMessage, type TranscriptMode } from './MessageView'
 import { PermissionDialog } from './PermissionDialog'
+import { PromptDialog } from './PromptDialog'
 import { RewindDialog } from './RewindDialog'
 import { Spark } from './Spark'
 import { ContextRing, McpButton, Working } from './StatusWidgets'
+import { TaskBar, type Todo } from './TaskBar'
 
 type Segment = { kind: 'user'; message: ChatMessage } | { kind: 'turn'; key: string; messages: ChatMessage[] }
 
@@ -118,6 +122,10 @@ export function ChatView(props: {
   const [notice, setNotice] = useState<string | null>(null)
   const [find, setFind] = useState<{ query: string; n: number } | null>(null)
   const [lightbox, setLightbox] = useState<{ images: ImageRef[]; index: number } | null>(null)
+  /** the "Files changed" side panel (the artifact panel and it take turns) */
+  const [filesOpen, setFilesOpen] = useState(false)
+  const [git, setGit] = useState<GitStatus | null>(null)
+  const [askWorktree, setAskWorktree] = useState(false)
   const images = useMemo(() => ({ sessionId: meta.id, open: (list: ImageRef[], index: number) => setLightbox({ images: list, index }) }), [meta.id])
   useEffect(() => {
     if (!props.findRequest) return
@@ -166,7 +174,10 @@ export function ChatView(props: {
   // Open the side panel on an artifact as soon as Claude creates or updates it.
   useEffect(() => {
     // (only fresh changes: reopening an old chat shouldn't pop the panel open)
-    if (props.lastArtifact && Date.now() - props.lastArtifact.at < 10_000) setPanel({ id: props.lastArtifact.id, version: null })
+    if (props.lastArtifact && Date.now() - props.lastArtifact.at < 10_000) {
+      setPanel({ id: props.lastArtifact.id, version: null })
+      setFilesOpen(false)
+    }
   }, [props.lastArtifact])
   const artifactInfo = (id: string) => {
     const a = props.artifacts.find((x) => x.id === id)
@@ -179,6 +190,16 @@ export function ChatView(props: {
 
   const busy = runtime.status !== 'idle'
   const started = !!meta.sdkSessionId || history.length > 0
+  const files = useMemo(() => changedFiles(history), [history])
+  // the branch and changes of the chat's folder, checked again after each reply and when you come back to the window
+  const refreshGit = useCallback(() => void api.gitStatus(meta.cwd).then(setGit), [meta.cwd])
+  useEffect(() => {
+    if (!busy) refreshGit()
+  }, [busy, refreshGit])
+  useEffect(() => {
+    window.addEventListener('focus', refreshGit)
+    return () => window.removeEventListener('focus', refreshGit)
+  }, [refreshGit])
 
   useEffect(() => {
     void api.listModels().then((m) => {
@@ -278,6 +299,31 @@ export function ChatView(props: {
   }
 
   const canRewind = top.some((m) => m.role === 'user' && (m.uuid || m.forkAt))
+  // Claude's task list for the reply it's working on
+  const liveTodos = useMemo((): Todo[] | null => {
+    if (!busy) return null
+    for (let i = top.length - 1; i >= 0 && top[i].role !== 'user'; i--)
+      for (let j = top[i].parts.length - 1; j >= 0; j--) {
+        const p = top[i].parts[j]
+        if (p.kind !== 'tool' || p.name !== 'TodoWrite') continue
+        const todos = parsedInput(p).todos
+        if (Array.isArray(todos) && todos.length) return todos as Todo[]
+      }
+    return null
+  }, [top, busy])
+  const gitMenu: MenuEntry[] = git
+    ? [
+        { section: `${git.worktree ? 'Worktree' : 'Branch'} · ${git.branch}` },
+        ...(git.changed
+          ? git.files.slice(0, 8).map((f) => ({ key: 'gf:' + f.path, label: f.path, hint: f.status, onSelect: () => void api.openPath(git.root + '/' + f.path.replace(/^.* -> /, '')) }))
+          : [{ key: 'clean', label: 'No uncommitted changes', disabled: true, onSelect: () => {} }]),
+        ...(git.changed > 8 ? [{ key: 'more', label: `… and ${git.changed - 8} more`, disabled: true, onSelect: () => {} }] : []),
+        'divider',
+        { key: 'copy', label: 'Copy branch name', onSelect: () => void navigator.clipboard.writeText(git.branch) },
+        { key: 'wt', label: 'New git worktree…', hint: started ? 'New chats only' : 'Own branch', disabled: started || busy, onSelect: () => setAskWorktree(true) },
+        { key: 'refresh', label: 'Refresh', onSelect: refreshGit }
+      ]
+    : []
   const mode = MODES.find((m) => m.value === meta.permissionMode) ?? MODES[0]
   const rl = props.rateLimit
   const modelLabel = meta.model ? (models.find((m) => m.value === meta.model)?.displayName ?? prettyModel(meta.model)) : prettyModel(runtime.init?.model)
@@ -302,6 +348,7 @@ export function ChatView(props: {
     { key: 'open', label: baseName(meta.cwd), hint: started ? 'Open' : 'Change', onSelect: () => (started ? void api.openPath(meta.cwd) : void changeFolder()) },
     ...meta.additionalDirs.map((d) => ({ key: 'dir:' + d, label: baseName(d), hint: 'Remove', onSelect: () => void api.setDirs(meta.id, meta.additionalDirs.filter((x) => x !== d)) })),
     { key: 'add', label: 'Add a folder…', onSelect: () => void addDir() },
+    ...(git && !started ? [{ key: 'worktree', label: 'Work in a new git worktree…', onSelect: () => setAskWorktree(true) }] : []),
     'divider',
     { section: 'Project' },
     ...(props.project ? [{ key: 'proj-open', label: props.project.name, hint: 'Open project', onSelect: () => props.onOpenProject(props.project!.id) }] : []),
@@ -386,13 +433,44 @@ export function ChatView(props: {
           >
             <Icon name="globe" size={18} />
           </button>
+          {files.length > 0 && (
+            <button
+              className={'icon-btn files-btn' + (filesOpen ? ' on' : '')}
+              onClick={() => {
+                setFilesOpen(!filesOpen)
+                setPanel(null)
+              }}
+              title={`Files changed (${files.length})`}
+            >
+              <Icon name="edit" size={18} />
+              <span className="count-badge">{files.length}</span>
+            </button>
+          )}
           <button
             className={'icon-btn' + (panel ? ' on' : '')}
-            onClick={() => setPanel(panel ? null : { id: null, version: null })}
+            onClick={() => {
+              setPanel(panel ? null : { id: null, version: null })
+              setFilesOpen(false)
+            }}
             title={props.artifacts.length ? `Artifacts (${props.artifacts.length})` : 'Artifacts'}
           >
             <Icon name="file" size={18} />
           </button>
+          {git && (
+            <Menu
+              className="git-menu"
+              align="right"
+              title={`${git.branch}${git.changed ? ` · ${git.changed} changed file${git.changed === 1 ? '' : 's'}` : ''}`}
+              trigger={
+                <>
+                  <Icon name="branch" size={15} />
+                  <span className="pill-label">{git.branch}</span>
+                  {git.changed > 0 && <span className="git-count">{git.changed}</span>}
+                </>
+              }
+              entries={gitMenu}
+            />
+          )}
           <button className="pill-btn" onClick={() => void api.openPath(meta.cwd)} title={`Open ${meta.cwd}`}>
             <Icon name="folder" size={15} />
             <span className="pill-label">{baseName(meta.cwd)}</span>
@@ -505,6 +583,7 @@ export function ChatView(props: {
                 {notice}
               </div>
             )}
+            {liveTodos && <TaskBar todos={liveTodos} />}
 
             <div className={'composer mode-' + meta.permissionMode}>
               {cmdMatches.length > 0 && (
@@ -705,6 +784,21 @@ export function ChatView(props: {
               onChoose={(v) => choice.resolve(v)}
             />
           )}
+          {askWorktree && (
+            <PromptDialog
+              title="Work in a new git worktree"
+              body={`Claude gets its own branch in a new folder next to ${baseName(git?.root ?? meta.cwd)}, so your checkout isn’t touched. This chat then works there.`}
+              placeholder="Branch name, like fix-login"
+              initial={'claude/' + meta.id.replace(/[^a-z0-9]/gi, '').slice(0, 6).toLowerCase()}
+              submitLabel="Create worktree"
+              onCancel={() => setAskWorktree(false)}
+              onSubmit={async (name) => {
+                props.onMeta(await api.createWorktree(meta.id, name))
+                setAskWorktree(false)
+                return null
+              }}
+            />
+          )}
           {rewind && (
             <RewindDialog
               sessionId={meta.id}
@@ -723,6 +817,9 @@ export function ChatView(props: {
           )}
         </div>
         {panel && <ArtifactPanel sessionId={meta.id} artifacts={props.artifacts} state={panel} onState={setPanel} onClose={() => setPanel(null)} />}
+        {filesOpen && !panel && (
+          <FilesPanel files={files} cwd={meta.cwd} canUndo={canRewind && !busy} onUndo={() => setRewind({ messageId: null })} onClose={() => setFilesOpen(false)} />
+        )}
       </div>
     </div>
   )

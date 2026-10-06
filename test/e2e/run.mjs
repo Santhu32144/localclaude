@@ -2,6 +2,7 @@
 // (LOCALCLAUDE_FAKE_AGENT), a throwaway profile, and file dialogs answered by the steps.
 // Run with `npm run test:e2e`. Pass a step name to run up to and including it.
 import { app, BrowserWindow, dialog, shell } from 'electron'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -104,6 +105,7 @@ app.whenReady().then(async () => {
     write: (p, d) => writeFileSync(p, d),
     mkdir: (p) => mkdirSync(p, { recursive: true }),
     list: (p) => readdirSync(p),
+    git: (cwd, args) => execFileSync('git', args, { cwd, stdio: 'pipe' }).toString(),
     /** Save a screenshot when LOCALCLAUDE_E2E_SHOTS names a folder. */
     shot: async (name) => {
       const dir = process.env.LOCALCLAUDE_E2E_SHOTS

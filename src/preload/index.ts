@@ -15,6 +15,7 @@ import type {
   ChatSearchHit,
   ExportRequest,
   ExportResult,
+  GitStatus,
   ImportResult,
   MemoryItem,
   ObsidianVault,
@@ -86,6 +87,9 @@ const api = {
   pathForFile: (f: File) => webUtils.getPathForFile(f),
   openPath: (p: string) => inv<string>('shell:openPath', p),
   openExternal: (url: string) => inv<void>('shell:openExternal', url),
+  gitStatus: (cwd: string) => inv<GitStatus | null>('git:status', cwd),
+  createWorktree: (sessionId: string, name: string) => inv<SessionMeta>('git:worktree', sessionId, name),
+  openInEditor: (path: string) => inv<void>('files:openInEditor', path),
   setWindowTheme: (dark: boolean) => inv<void>('window:theme', dark),
 
   listArtifacts: (sessionId: string) => inv<Artifact[]>('artifacts:list', sessionId),

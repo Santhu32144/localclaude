@@ -461,6 +461,19 @@ export interface ImportResult {
   withoutTranscript: number
 }
 
+// ---------------------------------------------------------------- git
+export interface GitStatus {
+  branch: string
+  /** the repository's top folder */
+  root: string
+  /** files with changes (staged, unstaged or new) */
+  changed: number
+  /** paths relative to the repository's top folder, with git's two-letter status */
+  files: { status: string; path: string }[]
+  /** the folder is a linked worktree (not the main checkout) */
+  worktree: boolean
+}
+
 // ---------------------------------------------------------------- Obsidian
 export interface ObsidianVault {
   path: string

@@ -12,6 +12,7 @@ import {
   type BackupStatus,
   type ExportRequest,
   type ExportResult,
+  type GitStatus,
   type ImportResult,
   type MemoryItem,
   type PermissionDecision,
@@ -28,6 +29,7 @@ import { BACKUP_EXT, MIN_PASSWORD, backupDue, backupFileName, createBackup, decr
 import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, startLogin } from './claude'
 import { stopComputerHelper } from './computer'
 import { attachContextMenu } from './contextMenu'
+import { createWorktree, gitStatus } from './git'
 import { IMAGE_EXT, sniffImageType, thumbnail } from './images'
 import { KnowledgeService } from './knowledge'
 import { VaultSync, activeVault, detectVaults, obsidianUri } from './obsidian'
@@ -485,6 +487,16 @@ function registerIpc(): void {
     },
     true
   )
+  // ---- git and files Claude changed
+  handle('git:status', (cwd: string): Promise<GitStatus | null> => gitStatus(cwd))
+  handle('git:worktree', async (sessionId: string, name: string) => {
+    const meta = store.getSession(sessionId)
+    if (!meta) throw new Error('Unknown chat')
+    if (meta.sdkSessionId) throw new Error('This chat has already started; start a new chat to use a new worktree.')
+    const { path } = await createWorktree(meta.cwd, name)
+    return manager.updateMeta(sessionId, { cwd: path })
+  })
+  handle('files:openInEditor', (path: string) => shell.openExternal('vscode://file/' + path.replace(/\\/g, '/')))
   handle('shell:openExternal', (url: string) => {
     if (/^https?:\/\//.test(url)) return shell.openExternal(url)
     return undefined

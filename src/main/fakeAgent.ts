@@ -158,6 +158,16 @@ export function fakeQuery({ prompt, options = {} }: { prompt: string | AsyncIter
         return r
       })
       reply = `Note: ${saved}`
+    } else if (t.includes('plan tasks')) {
+      const todos = [
+        { content: 'Read the code', activeForm: 'Reading the code', status: 'completed' },
+        { content: 'Write tests', activeForm: 'Writing tests', status: 'in_progress' },
+        { content: 'Fix the bug', activeForm: 'Fixing the bug', status: 'pending' }
+      ]
+      await callTool('TodoWrite', { todos }, async () => ({ text: 'Todos updated', isError: false }))
+      // work on them for a moment, so the task list can be seen
+      for (let i = 0; i < 25 && !interrupted; i++) await sleep(100)
+      reply = 'Tasks planned.'
     } else if (t.includes('take a screenshot')) {
       const id = 'toolu_' + randomUUID().slice(0, 8)
       out.push({ type: 'assistant', uuid: randomUUID(), parent_tool_use_id: null, message: { id: 'msg_' + randomUUID().slice(0, 8), content: [{ type: 'tool_use', id, name: 'mcp__computer-use__computer', input: { action: 'screenshot' } }] } })
