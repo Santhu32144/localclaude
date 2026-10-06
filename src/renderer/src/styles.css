@@ -3359,3 +3359,26 @@ button.chip:hover {
     opacity: 0;
   }
 }
+
+/* ---------- backups ---------- */
+.password-dialog .input {
+  width: 100%;
+}
+.backup-auto {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 4px 0 0 28px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+}
+.backup-auto .field {
+  margin: 0;
+}
+.backup-schedule > .field {
+  flex: 1;
+  min-width: 0;
+}
+.backup-note {
+  margin: 8px 0 4px;
+}

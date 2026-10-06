@@ -4,6 +4,8 @@ import type {
   AppSettings,
   Attachment,
   AuthStatus,
+  BackupResult,
+  BackupStatus,
   ChatMessage,
   LockStatus,
   LoginEvent,
@@ -118,6 +120,12 @@ const api = {
   exportData: (req: ExportRequest) => inv<ExportResult>('export:run', req),
   revealFile: (path: string) => inv<void>('export:reveal', path),
   importData: () => inv<ImportResult>('import:run'),
+  importWithPassword: (password: string) => inv<ImportResult>('import:withPassword', password),
+  cancelImport: () => inv<void>('import:cancel'),
+  backupStatus: () => inv<BackupStatus>('backup:status'),
+  setBackupPassword: (password: string | null) => inv<BackupStatus>('backup:setPassword', password),
+  backupNow: () => inv<BackupResult>('backup:runNow'),
+  backupSaveAs: (password: string) => inv<BackupResult>('backup:saveAs', password),
   platform: process.platform
 }
 

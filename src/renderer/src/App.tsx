@@ -4,6 +4,7 @@ import type {
   AgentEvent,
   Artifact,
   ExportScope,
+  ImportResult,
   MemoryItem,
   AppSettings,
   AuthStatus,
@@ -25,6 +26,7 @@ import { ChatView } from './components/ChatView'
 import { LockScreen } from './components/LockScreen'
 import { LoginScreen } from './components/LoginScreen'
 import { ExportDialog } from './components/ExportDialog'
+import { PasswordDialog } from './components/PasswordDialog'
 import { ProjectView, ProjectsView } from './components/Projects'
 import type { TranscriptMode } from './components/MessageView'
 import { SettingsDialog } from './components/SettingsDialog'
@@ -333,10 +335,9 @@ export default function App() {
     [openChat]
   )
 
-  const runImport = useCallback(async () => {
-    const r = await api.importData()
-    if (r.canceled) return
-    if (!r.ok) return setToast({ text: r.error ?? 'Import failed.', error: true })
+  /** a password-protected backup was picked: ask for its password */
+  const [restoreAsk, setRestoreAsk] = useState(false)
+  const imported = useCallback(async (r: ImportResult) => {
     const [list, projs, memory] = await Promise.all([api.listSessions(), api.listProjects(), api.globalMemory()])
     setSessions(list)
     setProjects(projs)
@@ -349,6 +350,17 @@ export default function App() {
         (r.skipped ? ` Skipped ${r.skipped} already here.` : '') +
         (r.withoutTranscript ? ` ${r.withoutTranscript} chat${r.withoutTranscript === 1 ? '' : 's'} will send ${r.withoutTranscript === 1 ? 'its' : 'their'} earlier messages to Claude as context.` : '')
     })
+  }, [])
+  const runImport = useCallback(async () => {
+    const r = await api.importData()
+    if (r.canceled) return
+    if (r.needsPassword) return setRestoreAsk(true)
+    if (!r.ok) return setToast({ text: r.error ?? 'Import failed.', error: true })
+    await imported(r)
+  }, [imported])
+  const cancelRestore = useCallback(() => {
+    setRestoreAsk(false)
+    void api.cancelImport()
   }, [])
 
   const signOut = useCallback(async () => {
@@ -592,6 +604,21 @@ export default function App() {
           sessions={sessions}
           projects={projects}
           onClose={() => setExportReq(null)}
+        />
+      )}
+      {restoreAsk && (
+        <PasswordDialog
+          title="Restore a backup"
+          body="Enter the password this backup was made with. Chats, projects and memory that are already here are skipped."
+          submitLabel="Restore"
+          onCancel={cancelRestore}
+          onSubmit={async (password) => {
+            const r = await api.importWithPassword(password)
+            if (!r.ok) return r.error ?? 'Couldn’t restore this backup.'
+            setRestoreAsk(false)
+            await imported(r)
+            return null
+          }}
         />
       )}
       {toast && (

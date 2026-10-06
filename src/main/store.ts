@@ -21,6 +21,16 @@ interface Vault {
   projects?: Project[]
   /** global memory (project memory lives on each project) */
   memory?: MemoryItem[]
+  /** automatic backups: the password, and how the last one went */
+  backup?: BackupState
+}
+
+export interface BackupState {
+  password?: string
+  lastAt?: number
+  lastFile?: string
+  lastSize?: number
+  lastError?: string
 }
 
 const MAGIC = Buffer.from('LCV1')
@@ -226,6 +236,15 @@ export class SecureStore {
       n++
     }
     return n
+  }
+
+  // ---------- backups ----------
+  getBackupState(): BackupState {
+    return this.vault.backup ?? {}
+  }
+  setBackupState(patch: Partial<BackupState>): void {
+    this.vault.backup = { ...this.vault.backup, ...patch }
+    this.saveVault()
   }
 
   // ---------- memory ----------

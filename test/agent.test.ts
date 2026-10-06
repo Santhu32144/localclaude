@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { PROJECT_KNOWLEDGE_LIMIT, SessionManager, systemAppend } from '../src/main/agent'
 import { ARTIFACT_TOOLS, createArtifactServer, renderArtifactPage } from '../src/main/artifacts'
+import { backupDue, backupFileName, backupZip, createBackup, decryptBackup, encryptBackup, isEncryptedBackup, pruneBackups, writeBackupTo } from '../src/main/backup'
 import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup, readBackup } from '../src/main/exporter'
 import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
 import { createZip, readZip } from '../src/main/zip'
@@ -15,7 +16,7 @@ import { projectDirName, transcriptExists } from '../src/main/transcripts'
 import { mapUsage } from '../src/main/usage'
 import { fitToScreens } from '../src/main/windowState'
 import { resolveStyle } from '../src/shared/styles'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_EXPORT_OPTIONS } from '../src/shared/types'
@@ -653,6 +654,56 @@ async function imagesInChats() {
   console.log('✓ images: types and sizes, attach, screenshots, resend on edit, pruning, exports and backups')
 }
 
+async function backups() {
+  // --- the encrypted file
+  const data = Buffer.from('hello backup '.repeat(200))
+  const enc = await encryptBackup(data, 'correct horse')
+  assert.ok(isEncryptedBackup(enc)); assert.ok(!isEncryptedBackup(data)); assert.ok(!enc.includes(Buffer.from('hello backup')), 'nothing readable inside')
+  assert.ok((await decryptBackup(enc, 'correct horse')).equals(data))
+  await assert.rejects(decryptBackup(enc, 'correct horsf'), /Wrong password/)
+  const damaged = Buffer.from(enc)
+  damaged[damaged.length - 5] ^= 1
+  await assert.rejects(decryptBackup(damaged, 'correct horse'), /damaged/)
+  await assert.rejects(decryptBackup(createZip([{ name: 'a', data: 'b' }]), 'correct horse'), /not a LocalClaude backup/)
+  assert.ok(!(await encryptBackup(data, 'correct horse')).equals(enc), 'fresh salt and nonce every time')
+
+  // --- what's inside: the backup JSON and each image once; restoring brings everything back
+  const st: any = memStore()
+  sampleData(st)
+  const img = { id: '7c9e6679-7425-40de-944b-e07fc1f90ae7', mediaType: 'image/png', width: 3, height: 3 }
+  const withImage = (id: string) => ({ id, role: 'user', ts: 5, parts: [{ kind: 'text', text: 'look' }], images: 1, imageRefs: [img] })
+  st.saveHistory('c2', [...st.loadHistory('c2'), withImage('u8'), withImage('u9')])
+  st.saveImage('c2', img.id, png(3, 3))
+  assert.deepEqual(readZip(backupZip(st)).map((e) => e.name), ['localclaude-backup.json', `images/${img.id}.png`])
+  const file = await createBackup(st, 'correct horse')
+  const { backup, images } = readBackup(await decryptBackup(file, 'correct horse'))
+  const fresh: any = memStore()
+  const r = importBackup(fresh, backup, new Set(), images)
+  assert.equal(r.chats, 2); assert.equal(r.projects, 1); assert.equal(r.memory, 1); assert.equal(r.artifacts, 2)
+  assert.ok(fresh.loadImage('c2', img.id)?.equals(png(3, 3))); assert.equal(fresh.loadProjectFiles('p1').f1, 'SPEC')
+
+  // --- automatic backups: when they're due, their names, and keeping the newest few
+  const hour = 3600_000
+  assert.ok(backupDue(undefined, 'daily')); assert.ok(!backupDue(Date.now() - 2 * hour, 'daily')); assert.ok(backupDue(Date.now() - 23.5 * hour, 'daily'))
+  assert.ok(!backupDue(Date.now() - 3 * 24 * hour, 'weekly')); assert.ok(backupDue(Date.now() - 7 * 24 * hour, 'weekly'))
+  assert.equal(backupFileName(new Date(2026, 9, 6, 21, 5)), 'LocalClaude backup 2026-10-06 2105.lcbackup')
+  const dir = mkdtempSync(join(tmpdir(), 'lc-bk-'))
+  for (const d of [1, 2, 3, 4, 5]) writeFileSync(join(dir, backupFileName(new Date(2026, 9, d, 10, 0))), 'x')
+  writeFileSync(join(dir, 'notes.txt'), 'mine'); writeFileSync(join(dir, 'LocalClaude backup (manual).lcbackup'), 'mine')
+  assert.deepEqual(pruneBackups(dir, 3), [backupFileName(new Date(2026, 9, 2, 10, 0)), backupFileName(new Date(2026, 9, 1, 10, 0))])
+  assert.ok(existsSync(join(dir, 'notes.txt')) && existsSync(join(dir, 'LocalClaude backup (manual).lcbackup')), "other files aren't touched")
+  const at = new Date(2026, 9, 6, 10, 0)
+  const w1 = await writeBackupTo(st, dir, 'correct horse', 3, at)
+  const w2 = await writeBackupTo(st, dir, 'correct horse', 3, at)
+  assert.notEqual(w1.path, w2.path, 'same minute: a second file'); assert.match(w2.path, / \(2\)\.lcbackup$/)
+  assert.equal(statSync(w2.path).size, w2.size)
+  const left = readdirSync(dir).filter((f) => f.endsWith('.lcbackup') && !f.includes('manual')).sort()
+  assert.deepEqual(left, [backupFileName(new Date(2026, 9, 5, 10, 0)), backupFileName(at).replace('.lcbackup', ' (2).lcbackup'), backupFileName(at)].sort(), 'the newest 3 are kept')
+  assert.ok(isEncryptedBackup(readFileSync(w2.path)), 'written encrypted')
+  rmSync(dir, { recursive: true, force: true })
+  console.log('✓ backups: encryption, wrong password, damage, contents with images, restore, schedule, naming, cleanup')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -695,6 +746,7 @@ exportAndImport()
 await reliabilityAndUx()
 await chatSearch()
 await imagesInChats()
+await backups()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

@@ -8,6 +8,8 @@ import {
   type AgentEvent,
   type AppSettings,
   type Attachment,
+  type BackupResult,
+  type BackupStatus,
   type ExportRequest,
   type ExportResult,
   type ImportResult,
@@ -21,6 +23,7 @@ import {
 } from '../shared/types'
 import { SessionManager } from './agent'
 import { renderArtifactPage } from './artifacts'
+import { BACKUP_EXT, MIN_PASSWORD, backupDue, backupFileName, createBackup, decryptBackup, isEncryptedBackup, writeBackupTo } from './backup'
 import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, startLogin } from './claude'
 import { stopComputerHelper } from './computer'
 import { attachContextMenu } from './contextMenu'
@@ -293,19 +296,63 @@ function registerIpc(): void {
     }
   })
   handle('export:reveal', (p: string) => shell.showItemInFolder(p))
+  const emptyImport = { chats: 0, projects: 0, artifacts: 0, memory: 0, skipped: 0, withoutTranscript: 0 }
   handle('import:run', async (): Promise<ImportResult> => {
-    const empty = { chats: 0, projects: 0, artifacts: 0, memory: 0, skipped: 0, withoutTranscript: 0 }
     const r = await dialog.showOpenDialog(win!, {
-      title: 'Import a LocalClaude export',
+      title: 'Import a LocalClaude export or backup',
       properties: ['openFile'],
-      filters: [{ name: 'LocalClaude export', extensions: ['zip', 'json'] }]
+      filters: [{ name: 'LocalClaude export or backup', extensions: ['zip', 'json', BACKUP_EXT] }]
     })
-    if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true, ...empty }
+    if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true, ...emptyImport }
     try {
-      const { backup, images } = readBackup(readFileSync(r.filePaths[0]))
+      const buf = readFileSync(r.filePaths[0])
+      // a password-protected backup: the window asks for the password, then calls import:withPassword
+      if (isEncryptedBackup(buf)) {
+        pendingImport = r.filePaths[0]
+        return { ok: false, needsPassword: true, ...emptyImport }
+      }
+      const { backup, images } = readBackup(buf)
       return importBackup(store, backup, undefined, images)
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e), ...empty }
+      return { ok: false, error: e instanceof Error ? e.message : String(e), ...emptyImport }
+    }
+  })
+  handle('import:withPassword', async (password: string): Promise<ImportResult> => {
+    if (!pendingImport) return { ok: false, error: 'Choose the backup file again.', ...emptyImport }
+    try {
+      const { backup, images } = readBackup(await decryptBackup(readFileSync(pendingImport), password))
+      pendingImport = null
+      return importBackup(store, backup, undefined, images)
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), ...emptyImport }
+    }
+  })
+  handle('import:cancel', () => {
+    pendingImport = null
+  })
+
+  // ---- backups
+  handle('backup:status', () => backupStatus())
+  handle('backup:setPassword', (password: string | null) => {
+    if (password !== null && password.length < MIN_PASSWORD) throw new Error(`Use at least ${MIN_PASSWORD} characters.`)
+    store.setBackupState({ password: password ?? undefined })
+    return backupStatus()
+  })
+  handle('backup:runNow', () => runAutoBackup())
+  handle('backup:saveAs', async (password: string): Promise<BackupResult> => {
+    if (!password || password.length < MIN_PASSWORD) return { ok: false, error: `Use at least ${MIN_PASSWORD} characters.` }
+    const r = await dialog.showSaveDialog(win!, {
+      title: 'Save a backup',
+      defaultPath: join(store.getSettings().backupDir || app.getPath('documents'), backupFileName()),
+      filters: [{ name: 'LocalClaude backup', extensions: [BACKUP_EXT] }]
+    })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      const data = await createBackup(store, password)
+      writeFileSync(r.filePath, data)
+      return { ok: true, path: r.filePath, size: data.length }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
     }
   })
   handle('projects:delete', (id: string) => {
@@ -433,6 +480,48 @@ function serveImages(): void {
   })
 }
 
+// ---- backups: password-protected copies of everything, on demand or on a schedule
+let pendingImport: string | null = null
+let backupRunning = false
+const defaultBackupDir = (): string => join(app.getPath('documents'), 'LocalClaude backups')
+
+function backupStatus(): BackupStatus {
+  const st = store.getBackupState()
+  return { hasPassword: !!st.password, lastAt: st.lastAt, lastFile: st.lastFile, lastSize: st.lastSize, lastError: st.lastError, defaultDir: defaultBackupDir(), running: backupRunning }
+}
+
+/** Write a backup to the backup folder with the saved password (on schedule, or "Back up now"). */
+async function runAutoBackup(): Promise<BackupResult> {
+  const s = store.getSettings()
+  const password = store.getBackupState().password
+  if (!password) return { ok: false, error: 'Set a backup password first.' }
+  if (backupRunning) return { ok: false, error: 'A backup is already running.' }
+  backupRunning = true
+  try {
+    const r = await writeBackupTo(store, s.backupDir || defaultBackupDir(), password, s.backupKeep)
+    store.setBackupState({ lastAt: Date.now(), lastFile: r.path, lastSize: r.size, lastError: undefined })
+    return { ok: true, ...r }
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e)
+    store.setBackupState({ lastError: error })
+    return { ok: false, error }
+  } finally {
+    backupRunning = false
+  }
+}
+
+function scheduleBackups(): void {
+  const tick = (): void => {
+    if (!store.lock.ok) return
+    const s = store.getSettings()
+    const st = store.getBackupState()
+    if (s.autoBackup && st.password && backupDue(st.lastAt, s.backupEvery)) void runAutoBackup()
+  }
+  // a minute after start (not to slow it down), then every half hour
+  setTimeout(tick, 60_000)
+  setInterval(tick, 30 * 60_000)
+}
+
 /** Settings that only change the UI; changing them doesn't restart idle chats. */
 const UI_ONLY_SETTINGS = new Set<keyof AppSettings>([
   'theme',
@@ -443,7 +532,11 @@ const UI_ONLY_SETTINGS = new Set<keyof AppSettings>([
   'quickShortcut',
   'defaultCwd',
   'defaultModel',
-  'defaultPermissionMode'
+  'defaultPermissionMode',
+  'autoBackup',
+  'backupDir',
+  'backupEvery',
+  'backupKeep'
 ])
 
 function bringToFront(): void {
@@ -507,6 +600,7 @@ app.whenReady().then(() => {
   serveImages()
   createWindow()
   if (store.lock.ok) applyQuickShortcut(store.getSettings().quickShortcut)
+  if (!TEST_MODE) scheduleBackups()
 })
 
 app.on('second-instance', () => bringToFront())

@@ -49,6 +49,12 @@ export interface AppSettings {
   customStyles: ResponseStyle[]
   /** global shortcut that brings LocalClaude forward with a new chat ('' = off) */
   quickShortcut: string
+  /** write a password-protected backup to backupDir on a schedule (the password is kept apart, in the vault) */
+  autoBackup: boolean
+  backupDir: string
+  backupEvery: 'daily' | 'weekly'
+  /** how many automatic backups to keep in the folder */
+  backupKeep: number
   /** Extra instructions appended to Claude Code's system prompt */
   appendSystemPrompt: string
 }
@@ -298,6 +304,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultStyle: '',
   customStyles: [],
   quickShortcut: 'CommandOrControl+Alt+Space',
+  autoBackup: false,
+  backupDir: '',
+  backupEvery: 'daily',
+  backupKeep: 7,
   appendSystemPrompt: ''
 }
 
@@ -417,6 +427,8 @@ export interface ImportResult {
   ok: boolean
   canceled?: boolean
   error?: string
+  /** the file is a password-protected backup: ask for the password and call importWithPassword */
+  needsPassword?: boolean
   chats: number
   projects: number
   artifacts: number
@@ -424,6 +436,27 @@ export interface ImportResult {
   skipped: number
   /** chats whose Claude Code transcript isn't on this machine: they continue with the old messages as context */
   withoutTranscript: number
+}
+
+// ---------------------------------------------------------------- backups
+export interface BackupStatus {
+  /** a password is saved for automatic backups */
+  hasPassword: boolean
+  lastAt?: number
+  lastFile?: string
+  lastSize?: number
+  lastError?: string
+  /** where automatic backups go when no folder is chosen */
+  defaultDir: string
+  running: boolean
+}
+
+export interface BackupResult {
+  ok: boolean
+  canceled?: boolean
+  error?: string
+  path?: string
+  size?: number
 }
 
 // ---------------------------------------------------------------- styles & usage

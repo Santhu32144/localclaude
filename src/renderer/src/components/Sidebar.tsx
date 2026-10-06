@@ -282,7 +282,7 @@ export function Sidebar(props: {
             { key: 'projects', label: 'Projects', onSelect: props.onProjects },
             'divider',
             { key: 'export', label: 'Export all chats…', hint: 'Markdown + artifacts + projects, as a ZIP', onSelect: props.onExportAll },
-            { key: 'import', label: 'Import from an export…', onSelect: props.onImport },
+            { key: 'import', label: 'Import an export or backup…', onSelect: props.onImport },
             'divider',
             { key: 'settings', label: 'Settings', hint: 'Ctrl+,', onSelect: props.onSettings },
             { key: 'sidebar', label: 'Hide sidebar', hint: 'Ctrl+B', onSelect: props.onCollapse }

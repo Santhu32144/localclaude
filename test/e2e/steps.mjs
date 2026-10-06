@@ -144,7 +144,7 @@ export const steps = [
       await c.page("__t.click(__t.byText('.export-dialog .btn', 'Done'))")
       c.answers.push(zip)
       await c.page("__t.click(__t.q('.side-titlebar .menu-trigger'))")
-      await c.menuItem('Import from an export')
+      await c.menuItem('Import an export or backup')
       await c.waitFor('import result', "__t.text('.toast').includes('Skipped')")
     }
   },
@@ -276,6 +276,60 @@ export const steps = [
       await c.waitFor('full size in the viewer', "(() => { const i = __t.q('.lightbox-img'); return !!i && i.complete && i.naturalWidth === 640 })()")
       await c.page("__t.click(__t.q('.lightbox'))")
       await c.waitFor('closed by clicking outside', "!__t.q('.lightbox')")
+    }
+  },
+  {
+    name: 'back up everything with a password',
+    run: async (c) => {
+      const file = c.file('everything.lcbackup')
+      await c.openSettings('Backups')
+      await c.waitFor('backups tab', "__t.text('.modal-body h2') === 'Backups'")
+      await c.page("__t.click(__t.byText('.modal-body .btn', 'Back up now…'))")
+      await c.waitFor('password dialog', "!!__t.q('.password-dialog')")
+      await c.page("(() => { const [a, b] = __t.qa('.password-dialog input'); __t.setValue(a, 'correct horse'); __t.setValue(b, 'correct horsf'); return true })()")
+      await c.page("__t.click(__t.byText('.password-dialog .btn', 'Choose where to save'))")
+      await c.waitFor('mismatch caught', "__t.text('.password-dialog').includes('don’t match')")
+      await c.page("__t.setValue(__t.qa('.password-dialog input')[1], 'correct horse')")
+      c.answers.push(file)
+      await c.page("__t.click(__t.byText('.password-dialog .btn', 'Choose where to save'))")
+      await c.waitFor('saved', "!__t.q('.password-dialog') && __t.text('.backup-note').includes('Saved the backup')", 20000)
+      if (c.read(file).subarray(0, 6).toString() !== 'LCBK1\n') throw new Error('not an encrypted backup')
+      if (c.read(file).includes('hello again')) throw new Error('chat text is readable in the backup')
+    }
+  },
+  {
+    name: 'restore a backup with its password',
+    run: async (c) => {
+      c.answers.push(c.file('everything.lcbackup'))
+      await c.page("__t.click(__t.byText('.modal-body .btn', 'Restore from a backup…'))")
+      await c.waitFor('password asked', "__t.text('.password-dialog').includes('Restore a backup')")
+      await c.page("__t.setValue(__t.q('.password-dialog input'), 'wrong password')")
+      await c.page("__t.click(__t.byText('.password-dialog .btn', 'Restore'))")
+      await c.waitFor('wrong password', "__t.text('.password-dialog').includes('Wrong password')", 20000)
+      await c.page("__t.setValue(__t.q('.password-dialog input'), 'correct horse')")
+      await c.page("__t.click(__t.byText('.password-dialog .btn', 'Restore'))")
+      await c.waitFor('restored', "!__t.q('.password-dialog') && __t.text('.toast').includes('already here')", 20000)
+    }
+  },
+  {
+    name: 'automatic backups go to a folder',
+    run: async (c) => {
+      const dir = c.file('auto-backups')
+      c.mkdir(dir)
+      await c.page("__t.click(__t.byText('.modal-body .toggle', 'Back up automatically').querySelector('input'))")
+      await c.waitFor('asks for a password', "__t.text('.password-dialog').includes('Set a backup password')")
+      await c.page("(() => { const [a, b] = __t.qa('.password-dialog input'); __t.setValue(a, 'battery staple'); __t.setValue(b, 'battery staple'); return true })()")
+      await c.page("__t.click(__t.byText('.password-dialog .btn', 'Save password'))")
+      await c.waitFor('password saved', "!__t.q('.password-dialog') && __t.text('.backup-auto').includes('Saved, encrypted')")
+      c.answers.push(dir)
+      await c.page("__t.click(__t.byText('.backup-auto .btn', 'Change'))")
+      await c.waitFor('folder chosen', `__t.q('.backup-auto input').value === ${JSON.stringify(dir)}`)
+      await c.page("__t.click(__t.byText('.backup-auto .btn', 'Back up to folder now'))")
+      await c.waitFor('backed up', "__t.text('.backup-last').startsWith('Today')", 20000)
+      const files = c.list(dir)
+      if (files.length !== 1 || !/^LocalClaude backup .*\.lcbackup$/.test(files[0])) throw new Error('expected one backup in the folder, got ' + files.join(', '))
+      await c.shot('backups')
+      await c.closeModal()
     }
   }
 ]

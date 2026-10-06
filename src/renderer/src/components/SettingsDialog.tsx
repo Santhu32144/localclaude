@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { AppSettings, AuthStatus, LockStatus, McpServerEntry, MemoryItem } from '../../../shared/types'
 import { api } from '../api'
 import { REPLY_FONTS, UI_FONTS } from '../fonts'
+import { BackupsPanel } from './Backups'
 import { MemoryList } from './Memory'
 import { ShortcutField, StylesEditor, UsagePanel } from './SettingsExtras'
 
@@ -9,6 +10,7 @@ const TABS: [string, string][] = [
   ['general', 'General'],
   ['tools', 'Tools & computer'],
   ['memory', 'Memory & data'],
+  ['backups', 'Backups'],
   ['usage', 'Usage'],
   ['account', 'Account & privacy'],
   ['about', 'About']
@@ -372,13 +374,17 @@ export function SettingsDialog(props: {
                     Export all chats…
                   </button>
                   <button className="btn ghost" onClick={props.onImport}>
-                    Import from an export…
+                    Import an export or backup…
                   </button>
                 </div>
-                <p className="muted small">Single chats and projects can be exported from their ⋯ menus too (Ctrl+Shift+E).</p>
+                <p className="muted small">
+                  Single chats and projects can be exported from their ⋯ menus too (Ctrl+Shift+E). For password-protected and automatic backups, see Backups.
+                </p>
               </div>
             </>
           )}
+
+          {props.tab === 'backups' && <BackupsPanel settings={s} onChange={props.onChange} onRestore={props.onImport} />}
 
           {props.tab === 'account' && (
             <>
