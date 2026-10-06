@@ -609,6 +609,7 @@ export default function App() {
             projects={projects}
             onOpenProject={(id) => setPage({ kind: 'project', id })}
             onMoveToProject={(pid) => void moveChat(active.id, pid)}
+            onProjectChanged={upsertProject}
             onSettings={updateSettings}
             onRename={(t) => void renameChat(active.id, t)}
             onPin={(p) => void pinChat(active.id, p)}

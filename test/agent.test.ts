@@ -9,6 +9,7 @@ import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, rem
 import { createZip, readZip } from '../src/main/zip'
 import { branchName, createWorktree, gitStatus } from '../src/main/git'
 import { testMcpServer } from '../src/main/mcpCheck'
+import { addProjectDir, createProject, removeProjectDir, setProjectMainDir } from '../src/main/projects'
 import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { CHAT_TOOLS, ChatIndex, chatText, createChatsServer, snippet, terms } from '../src/main/chatSearch'
@@ -962,6 +963,43 @@ async function mcpServerCheck() {
   console.log('✓ MCP test: connects and lists tools, timeouts, crashes with their output, missing settings')
 }
 
+function projectFolders() {
+  const st: any = memStore()
+  st.upsertProject({ id: 'pf', name: 'Doraemon', description: '', instructions: '', files: [], createdAt: 1, updatedAt: 1 })
+  const dir = mkdtempSync(join(tmpdir(), 'lc-pf-'))
+  const [app, docs, gone] = ['app', 'docs', 'gone'].map((n) => join(dir, n))
+  mkdirSync(app)
+  mkdirSync(docs)
+  let p = addProjectDir(st, 'pf', app)
+  assert.equal(p.cwd, app, 'the first folder is the main one'); assert.equal(p.dirs, undefined)
+  p = addProjectDir(st, 'pf', docs)
+  p = addProjectDir(st, 'pf', docs)
+  p = addProjectDir(st, 'pf', app)
+  assert.deepEqual([p.cwd, p.dirs], [app, [docs]], 'no duplicates')
+  p = addProjectDir(st, 'pf', gone)
+  // every chat in the project can work in the project's folders, also one that started elsewhere
+  const pm = new SessionManager(st, () => {}, { transcriptExists: () => true })
+  const fresh = pm.create(undefined, 'pf')
+  assert.equal(fresh.cwd, app, 'new chats start in the main folder')
+  assert.deepEqual((pm as any).get(fresh.id).buildOptions().additionalDirectories, [docs], 'not its own folder, not folders that are gone')
+  const older = pm.create(process.cwd(), 'pf')
+  pm.setDirs(older.id, [docs])
+  assert.deepEqual((pm as any).get(older.id).buildOptions().additionalDirectories, [docs, app], 'its own extra folders, then the project’s')
+  const outside = pm.create(process.cwd())
+  assert.deepEqual((pm as any).get(outside.id).buildOptions().additionalDirectories, [], 'chats outside the project get nothing')
+  // removing the main folder makes the next one the main folder
+  p = removeProjectDir(st, 'pf', app)
+  assert.deepEqual([p.cwd, p.dirs], [docs, [gone]])
+  p = removeProjectDir(st, 'pf', gone)
+  p = setProjectMainDir(st, 'pf', app)
+  assert.deepEqual([p.cwd, p.dirs], [app, []], 'a new main folder replaces the old one')
+  p = removeProjectDir(st, 'pf', app)
+  assert.ok(!('cwd' in p), 'no folders left: chats use the default folder')
+  assert.equal(createProject(st, { name: 'Gadgets', cwd: docs }).cwd, docs, 'a project can start from a folder')
+  rmSync(dir, { recursive: true, force: true })
+  console.log('✓ project folders: main folder, more folders, every chat in the project gets them, removing and replacing')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -1008,6 +1046,7 @@ await backups()
 await knowledgeAndObsidian()
 await gitHelpers()
 await mcpServerCheck()
+projectFolders()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

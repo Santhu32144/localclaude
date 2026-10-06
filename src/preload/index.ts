@@ -101,12 +101,16 @@ const api = {
   saveArtifact: (sessionId: string, artifactId: string, version: number) => inv<boolean>('artifacts:save', sessionId, artifactId, version),
 
   listProjects: () => inv<Project[]>('projects:list'),
-  createProject: (input: { name: string; description?: string }) => inv<Project>('projects:create', input),
+  createProject: (input: { name: string; description?: string; cwd?: string }) => inv<Project>('projects:create', input),
+  addProjectDir: (id: string, folder?: string) => inv<Project | null>('projects:addDir', id, folder),
+  removeProjectDir: (id: string, folder: string) => inv<Project>('projects:removeDir', id, folder),
+  setProjectMainDir: (id: string) => inv<Project | null>('projects:setMainDir', id),
   updateProject: (id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd' | 'pinned'>>) =>
     inv<Project>('projects:update', id, patch),
   deleteProject: (id: string) => inv<void>('projects:delete', id),
   addProjectFiles: (id: string, paths: string[]) => inv<{ project: Project; skipped: string[] }>('projects:addFiles', id, paths),
   addProjectFolder: (id: string) => inv<Project | null>('projects:addFolder', id),
+  addKnowledgePaths: (id: string, paths: string[]) => inv<{ project: Project; skipped: string[] }>('projects:addKnowledgePaths', id, paths),
   removeProjectFolder: (id: string, folder: string) => inv<Project>('projects:removeFolder', id, folder),
   obsidianVaults: () => inv<ObsidianVault[]>('obsidian:vaults'),
   obsidianStatus: () => inv<VaultStatus>('obsidian:status'),

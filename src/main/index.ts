@@ -42,7 +42,17 @@ import { generateTitle } from './titles'
 import { fitToScreens, loadWindowState, trackWindowState } from './windowState'
 import { buildChatsExport, buildFullExport, buildProjectExport, chatMarkdown, importBackup, projectContext, readBackup } from './exporter'
 import { addMemory, editMemory, getMemory, removeMemory, setMemory } from './memory'
-import { addProjectFiles, addProjectFolder, createProject, removeProjectFile, removeProjectFolder, updateProject } from './projects'
+import {
+  addProjectDir,
+  addProjectFiles,
+  addProjectFolder,
+  createProject,
+  removeProjectDir,
+  removeProjectFile,
+  removeProjectFolder,
+  setProjectMainDir,
+  updateProject
+} from './projects'
 import { SecureStore } from './store'
 import { createZip } from './zip'
 
@@ -231,7 +241,7 @@ function registerIpc(): void {
     return p
   }
   handle('projects:list', () => store.listProjects())
-  handle('projects:create', (input: { name: string; description?: string }) => createProject(store, input))
+  handle('projects:create', (input: { name: string; description?: string; cwd?: string }) => createProject(store, input))
   handle('projects:update', (id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd' | 'pinned'>>) => {
     const p = updateProject(store, id, patch)
     return Object.keys(patch).every((k) => k === 'pinned') ? p : projectChanged(p)
@@ -398,10 +408,42 @@ function registerIpc(): void {
     projectChanged(r.project)
     return r
   })
+  handle('projects:addKnowledgePaths', async (id: string, paths: string[]) => {
+    const folders = paths.filter(isDir)
+    let project = store.getProject(id)!
+    for (const f of folders) project = addProjectFolder(store, id, f)
+    const files = paths.filter((p) => !folders.includes(p))
+    const r = files.length ? await addProjectFiles(store, id, files) : { project, skipped: [] as string[] }
+    projectChanged(r.project)
+    return r
+  })
   handle('projects:addFolder', async (id: string) => {
     const r = await dialog.showOpenDialog(win!, { title: 'Link a folder as knowledge', properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     return projectChanged(addProjectFolder(store, id, r.filePaths[0]))
+  })
+  // folders Claude works in, for every chat in the project
+  const pickProjectDir = async (title: string): Promise<string | null> => {
+    const r = await dialog.showOpenDialog(win!, { title, properties: ['openDirectory', 'createDirectory'] })
+    return r.canceled ? null : (r.filePaths[0] ?? null)
+  }
+  const isDir = (p: string): boolean => {
+    try {
+      return statSync(p).isDirectory()
+    } catch {
+      return false
+    }
+  }
+  handle('projects:addDir', async (id: string, folder?: string) => {
+    const path = folder ?? (await pickProjectDir('Add a folder to this project'))
+    if (!path) return null
+    if (!isDir(path)) throw new Error('Only folders can be added here.')
+    return projectChanged(addProjectDir(store, id, path))
+  })
+  handle('projects:removeDir', (id: string, folder: string) => projectChanged(removeProjectDir(store, id, folder)))
+  handle('projects:setMainDir', async (id: string) => {
+    const path = await pickProjectDir('Main folder for this project')
+    return path ? projectChanged(setProjectMainDir(store, id, path)) : null
   })
   handle('projects:removeFolder', (id: string, folder: string) => {
     knowledge.invalidate(folder)

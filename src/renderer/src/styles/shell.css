@@ -453,6 +453,10 @@
   flex-direction: column;
   text-align: left;
 }
+/* a long menu scrolls; its rows keep their height instead of being squeezed to fit */
+.menu-pop > * {
+  flex-shrink: 0;
+}
 .menu-pop.down {
   top: calc(100% + 4px);
 }

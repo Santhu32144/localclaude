@@ -225,3 +225,29 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+/* buttons that read as text: folder names you can open, the "main" tag you can change */
+.link-like {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.link-like:hover {
+  text-decoration: underline;
+}
+.project-dirs .knowledge-name {
+  display: block;
+}
+.project-folder-input {
+  min-width: 0;
+}
+.dir-main {
+  color: var(--muted);
+  font-size: 12px;
+}
+.dir-main:hover {
+  color: var(--text);
+}

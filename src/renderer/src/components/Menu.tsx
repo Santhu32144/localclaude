@@ -7,6 +7,8 @@ export interface MenuItem {
   checked?: boolean
   danger?: boolean
   disabled?: boolean
+  /** shown on hover, e.g. a folder's full path */
+  title?: string
   onSelect: () => void
 }
 export type MenuEntry = MenuItem | { section: ReactNode } | 'divider'
@@ -61,6 +63,7 @@ export function Menu(props: {
                 role="menuitem"
                 className={'menu-item' + (e.danger ? ' danger' : '') + (e.checked ? ' checked' : '')}
                 disabled={e.disabled}
+                title={e.title}
                 onClick={() => {
                   setOpen(false)
                   e.onSelect()

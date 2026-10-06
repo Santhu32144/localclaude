@@ -229,11 +229,15 @@ class AgentSession {
       autoAllowed.push(...kb.tools)
     }
 
+    // the project's folders are open to every chat in it, also chats that started before it had them
+    const projectDirs = project ? [project.cwd, ...(project.dirs ?? [])].filter((d): d is string => !!d) : []
+    const dirs = [...new Set([...this.meta.additionalDirs, ...projectDirs])].filter((d) => d !== this.meta.cwd && existsSync(d))
+
     this.abort = new AbortController()
     this.startedWithBypass = this.meta.permissionMode === 'bypassPermissions'
     return {
       cwd: this.meta.cwd,
-      additionalDirectories: this.meta.additionalDirs,
+      additionalDirectories: dirs,
       model: this.meta.model || s.defaultModel || undefined,
       permissionMode: this.meta.permissionMode,
       // Only passed when you pick "Full access" (Claude Code refuses this flag when running as root).

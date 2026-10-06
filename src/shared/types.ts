@@ -378,8 +378,10 @@ export interface Project {
   name: string
   description: string
   instructions: string
-  /** working folder for new chats in this project (falls back to the default) */
+  /** the project's main folder: new chats in it start here (falls back to the default) */
   cwd?: string
+  /** more folders every chat in the project can work in */
+  dirs?: string[]
   files: ProjectFile[]
   /** folders linked as knowledge: read live from disk, and Claude searches them */
   folders?: string[]

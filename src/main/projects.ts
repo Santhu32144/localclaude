@@ -6,13 +6,14 @@ import type { Project } from '../shared/types'
 import { ExtractError, extractFile } from './extract'
 import type { SecureStore } from './store'
 
-export function createProject(store: SecureStore, input: { name: string; description?: string }): Project {
+export function createProject(store: SecureStore, input: { name: string; description?: string; cwd?: string }): Project {
   const now = Date.now()
   const p: Project = {
     id: randomUUID(),
     name: input.name.trim() || 'Untitled project',
     description: input.description?.trim() ?? '',
     instructions: '',
+    ...(input.cwd ? { cwd: resolve(input.cwd) } : {}),
     files: [],
     createdAt: now,
     updatedAt: now
@@ -67,6 +68,40 @@ export async function addProjectFiles(store: SecureStore, id: string, paths: str
   const next = { ...p, files, updatedAt: Date.now() }
   store.upsertProject(next)
   return { project: next, skipped }
+}
+
+/**
+ * Give every chat in the project a folder to work in. The first one becomes the main folder
+ * (where new chats start); the rest are opened to every chat too.
+ */
+export function addProjectDir(store: SecureStore, id: string, folder: string): Project {
+  const p = store.getProject(id)
+  if (!p) throw new Error('Unknown project')
+  const path = resolve(folder)
+  if (p.cwd === path || (p.dirs ?? []).includes(path)) return p
+  const next = p.cwd ? { ...p, dirs: [...(p.dirs ?? []), path] } : { ...p, cwd: path }
+  store.upsertProject({ ...next, updatedAt: Date.now() })
+  return store.getProject(id)!
+}
+
+/** Take a folder off the project; removing the main folder makes the next one the main folder. */
+export function removeProjectDir(store: SecureStore, id: string, folder: string): Project {
+  const p = store.getProject(id)
+  if (!p) throw new Error('Unknown project')
+  const dirs = p.dirs ?? []
+  const next = p.cwd === folder ? { ...p, cwd: dirs[0], dirs: dirs.slice(1) } : { ...p, dirs: dirs.filter((d) => d !== folder) }
+  if (!next.cwd) delete next.cwd
+  store.upsertProject({ ...next, updatedAt: Date.now() })
+  return store.getProject(id)!
+}
+
+/** Make a folder the project's main folder (new chats start there). */
+export function setProjectMainDir(store: SecureStore, id: string, folder: string): Project {
+  const p = store.getProject(id)
+  if (!p) throw new Error('Unknown project')
+  const path = resolve(folder)
+  store.upsertProject({ ...p, cwd: path, dirs: (p.dirs ?? []).filter((d) => d !== path), updatedAt: Date.now() })
+  return store.getProject(id)!
 }
 
 /** Link a folder as knowledge: its notes and documents are read live, and Claude searches them. */

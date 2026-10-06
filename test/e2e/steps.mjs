@@ -604,5 +604,40 @@ export const steps = [
       await c.waitFor('moved', "__t.text('.toast').includes('Moved 1 chat to “E2E project”')")
       await c.waitFor('the project has it', "__t.byText('.project-card', 'E2E project').textContent.includes('2 chats')")
     }
+  },
+  {
+    name: 'project folders: from the project page and from a chat, and new projects from a folder',
+    run: async (c) => {
+      const [main, docs, assets, lab] = ['doraemon-app', 'doraemon-docs', 'doraemon-assets', 'gadget-lab'].map((n) => c.file(n))
+      for (const d of [main, docs, assets, lab]) c.mkdir(d)
+      await c.page("__t.click(__t.byText('.project-card', 'E2E project'))")
+      await c.waitFor('project page', "__t.text('.project-title-row h1') === 'E2E project'")
+      c.answers.push(main)
+      await c.page("__t.click(__t.byText('.folders-card .link-btn', 'Add folder'))")
+      await c.waitFor('the main folder', "__t.text('.project-dirs').includes('doraemon-app') && __t.text('.project-dirs').includes('main')")
+      c.answers.push(docs)
+      await c.page("__t.click(__t.byText('.folders-card .link-btn', 'Add folder'))")
+      await c.waitFor('a second folder', "__t.qa('.project-dirs li').length === 2")
+      await c.shot('project-folders')
+      await c.page("__t.click(__t.q('.project-chat'))")
+      await c.waitFor('a chat in the project', "__t.text('.titlebar .crumb').includes('E2E project')")
+      await c.page("__t.click(__t.q('.title-menu .menu-trigger'))")
+      await c.waitFor('the project’s folders in its menu', "!!__t.byText('.menu-item', 'doraemon-app') && __t.byText('.menu-item', 'doraemon-docs').textContent.includes('From the project')")
+      if (await c.page("__t.qa('.menu-pop > *').some((e) => getComputedStyle(e).flexShrink !== '0')")) throw new Error('menu rows can still be squeezed')
+      await c.shot('chat-folder-menu')
+      c.answers.push(assets)
+      await c.menuItem('Add a folder to “E2E project”')
+      await c.page("__t.click(__t.q('.title-menu .menu-trigger'))")
+      await c.waitFor('added for the whole project', "!!__t.byText('.menu-item', 'doraemon-assets')")
+      await c.page("__t.key(window, 'Escape')")
+      await c.waitFor('menu closed', "!__t.q('.menu-item')")
+      await c.page("__t.click(__t.byText('.side-nav', 'Projects'))")
+      await c.page("__t.click(__t.byText('.page-head .btn', 'New project'))")
+      c.answers.push(lab)
+      await c.page("__t.click(__t.byText('.project-form .btn', 'Choose'))")
+      await c.waitFor('named after the folder', "__t.q('.project-form input').value === 'gadget-lab'")
+      await c.page("__t.click(__t.byText('.project-form .btn', 'Create project'))")
+      await c.waitFor('created with its folder', "__t.text('.project-title-row h1') === 'gadget-lab' && __t.text('.project-dirs').includes('gadget-lab')")
+    }
   }
 ]

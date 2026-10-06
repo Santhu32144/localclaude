@@ -95,6 +95,8 @@ export function ChatView(props: {
   projects: Project[]
   onOpenProject: (id: string) => void
   onMoveToProject: (projectId: string | undefined) => void
+  /** the chat's project changed (a folder was added to it from this chat) */
+  onProjectChanged: (p: Project) => void
   onTranscript: (m: TranscriptMode) => void
   onPermissionDone: (requestId: string) => void
   onMeta: (m: SessionMeta) => void
@@ -293,6 +295,15 @@ export function ChatView(props: {
     const p = await api.pickFolder('Give Claude access to another folder')
     if (p && !meta.additionalDirs.includes(p) && p !== meta.cwd) await api.setDirs(meta.id, [...meta.additionalDirs, p])
   }
+  const addProjectDir = async (): Promise<void> => {
+    if (!props.project) return
+    const next = await api.addProjectDir(props.project.id)
+    if (next) props.onProjectChanged(next)
+  }
+  // folders this chat gets from its project (besides its own)
+  const projectDirs = props.project
+    ? [props.project.cwd, ...(props.project.dirs ?? [])].filter((d): d is string => !!d && d !== meta.cwd && !meta.additionalDirs.includes(d))
+    : []
 
   const setMode = (v: PermissionModeUI): void => {
     if (v === 'bypassPermissions' && !confirm('Full access lets Claude edit, delete and run anything on this machine without asking. Continue?')) return
@@ -346,9 +357,13 @@ export function ChatView(props: {
       : []),
     'divider',
     { section: 'Working folder' },
-    { key: 'open', label: baseName(meta.cwd), hint: started ? 'Open' : 'Change', onSelect: () => (started ? void api.openPath(meta.cwd) : void changeFolder()) },
-    ...meta.additionalDirs.map((d) => ({ key: 'dir:' + d, label: baseName(d), hint: 'Remove', onSelect: () => void api.setDirs(meta.id, meta.additionalDirs.filter((x) => x !== d)) })),
-    { key: 'add', label: 'Add a folder…', onSelect: () => void addDir() },
+    { key: 'open', label: baseName(meta.cwd), title: meta.cwd, hint: started ? 'Open' : 'Change', onSelect: () => (started ? void api.openPath(meta.cwd) : void changeFolder()) },
+    ...projectDirs.map((d) => ({ key: 'pdir:' + d, label: baseName(d), title: d, hint: `From the project · Open`, onSelect: () => void api.openPath(d) })),
+    ...meta.additionalDirs.map((d) => ({ key: 'dir:' + d, label: baseName(d), title: d, hint: 'This chat only · Remove', onSelect: () => void api.setDirs(meta.id, meta.additionalDirs.filter((x) => x !== d)) })),
+    ...(props.project
+      ? [{ key: 'add-proj', label: `Add a folder to “${props.project.name}”…`, hint: 'Every chat in the project', onSelect: () => void addProjectDir() }]
+      : []),
+    { key: 'add', label: props.project ? 'Add a folder to this chat only…' : 'Add a folder…', onSelect: () => void addDir() },
     ...(git && !started ? [{ key: 'worktree', label: 'Work in a new git worktree…', onSelect: () => setAskWorktree(true) }] : []),
     'divider',
     { section: 'Project' },

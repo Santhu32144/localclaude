@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type DragEvent, type ReactNode } from 'react'
 import { ARTIFACT_LABEL } from '../../../shared/format'
 import type { MemoryItem, Project, ProjectArtifactRef, ProjectContextUsage, SessionMeta } from '../../../shared/types'
 import { api } from '../api'
@@ -48,6 +48,7 @@ export function ProjectsView(props: {
   onDropChats: (projectId: string, ids: string[]) => void
 }) {
   const [creating, setCreating] = useState(false)
+  const [folder, setFolder] = useState('')
   const [dropOn, setDropOn] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
@@ -59,10 +60,11 @@ export function ProjectsView(props: {
 
   const create = async (): Promise<void> => {
     if (!name.trim()) return
-    const p = await api.createProject({ name, description: desc })
+    const p = await api.createProject({ name, description: desc, cwd: folder || undefined })
     setCreating(false)
     setName('')
     setDesc('')
+    setFolder('')
     props.onCreated(p)
   }
 
@@ -83,6 +85,21 @@ export function ProjectsView(props: {
               <input className="input" autoFocus placeholder="Name your project" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void create()} />
               <label className="small">What are you trying to achieve?</label>
               <textarea className="input" rows={3} placeholder="Describe your project, goals, subject, etc." value={desc} onChange={(e) => setDesc(e.target.value)} />
+              <label className="small">Folder to work in (optional)</label>
+              <div className="row gap">
+                <input className="input grow mono project-folder-input" readOnly placeholder="Your default folder" value={folder} title={folder} />
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    const d = await api.pickFolder('Folder for this project')
+                    if (!d) return
+                    setFolder(d)
+                    if (!name.trim()) setName(folderName(d))
+                  }}
+                >
+                  Choose…
+                </button>
+              </div>
               <div className="row gap end">
                 <button className="btn ghost" onClick={() => setCreating(false)}>
                   Cancel
@@ -244,6 +261,49 @@ export function ProjectView(props: {
   const [editingInstr, setEditingInstr] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
+  /** a folder or file dragged from your file manager is over the Folders or Knowledge card */
+  const [dropCard, setDropCard] = useState<'folders' | 'knowledge' | null>(null)
+  const [folderNote, setFolderNote] = useState<string | null>(null)
+  const projectDirs = [p.cwd, ...(p.dirs ?? [])].filter((d): d is string => !!d)
+  const filesOver = (card: 'folders' | 'knowledge') => ({
+    onDragOver: (e: DragEvent) => {
+      if (!e.dataTransfer.types.includes('Files')) return
+      e.preventDefault()
+      setDropCard(card)
+    },
+    onDragLeave: (e: DragEvent) => {
+      if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropCard(null)
+    }
+  })
+  /** dropped on Folders: folders Claude works in. Dropped on Knowledge: files to read, folders to search. */
+  const dropPaths = async (e: DragEvent, card: 'folders' | 'knowledge'): Promise<void> => {
+    e.preventDefault()
+    setDropCard(null)
+    const paths = Array.from(e.dataTransfer.files)
+      .map((f) => api.pathForFile(f))
+      .filter(Boolean)
+    if (!paths.length) return
+    const skipped: string[] = []
+    if (card === 'folders') {
+      for (const path of paths)
+        try {
+          const next = await api.addProjectDir(p.id, path)
+          if (next) props.onChanged(next)
+        } catch {
+          skipped.push(folderName(path))
+        }
+      setFolderNote(skipped.length ? `Only folders go here (drop files on Knowledge): ${skipped.join(', ')}` : null)
+      return
+    }
+    setAdding(true)
+    try {
+      const r = await api.addKnowledgePaths(p.id, paths)
+      props.onChanged(r.project)
+      setNotice(r.skipped.length ? `Skipped: ${r.skipped.join(', ')}` : null)
+    } finally {
+      setAdding(false)
+    }
+  }
   const [renaming, setRenaming] = useState<{ name: string; description: string } | null>(null)
   const [artifacts, setArtifacts] = useState<ProjectArtifactRef[]>([])
   const [usage, setUsage] = useState<ProjectContextUsage | null>(null)
@@ -377,6 +437,53 @@ export function ProjectView(props: {
           </section>
 
           <aside className="project-side">
+            <div className={'side-card folders-card' + (dropCard === 'folders' ? ' drop-target' : '')} {...filesOver('folders')} onDrop={(e) => void dropPaths(e, 'folders')}>
+              <div className="side-card-head">
+                <span>Folders</span>
+                <button
+                  className="link-btn"
+                  onClick={async () => {
+                    const next = await api.addProjectDir(p.id)
+                    if (next) props.onChanged(next)
+                  }}
+                >
+                  + Add folder
+                </button>
+              </div>
+              {projectDirs.length === 0 ? (
+                <div className="side-card-body muted">
+                  No folder yet, so chats work in {folderName(props.defaultCwd) || 'your default folder'}. Add the folder you’re working on, or drop it here.
+                </div>
+              ) : (
+                <ul className="knowledge-list project-dirs">
+                  {projectDirs.map((d, i) => (
+                    <li key={d} title={d}>
+                      <Icon name="folder" size={15} />
+                      <button className="knowledge-name link-like" title={`Open ${d}`} onClick={() => void api.openPath(d)}>
+                        {folderName(d)}
+                      </button>
+                      {i === 0 && p.cwd ? (
+                        <button className="link-like dir-main" title="New chats start here. Click to pick another main folder." onClick={async () => {
+                          const next = await api.setProjectMainDir(p.id)
+                          if (next) props.onChanged(next)
+                        }}>
+                          main
+                        </button>
+                      ) : null}
+                      <button className="icon-btn" title={i === 0 && p.cwd ? 'Remove (the next folder becomes the main one)' : 'Remove'} onClick={async () => props.onChanged(await api.removeProjectDir(p.id, d))}>
+                        <Icon name="x" size={13} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {folderNote && <div className="notice small">{folderNote}</div>}
+              <div className="muted small">
+                {projectDirs.length > 1 ? 'New chats start in the main folder. ' : projectDirs.length ? 'New chats start here. ' : ''}
+                Claude can work in these folders in every chat in this project. Drop folders here to add them.
+              </div>
+            </div>
+
             <ContextCard usage={usage} />
 
             <div className="side-card">
@@ -442,7 +549,7 @@ export function ProjectView(props: {
               />
             </div>
 
-            <div className="side-card">
+            <div className={'side-card' + (dropCard === 'knowledge' ? ' drop-target' : '')} {...filesOver('knowledge')} onDrop={(e) => void dropPaths(e, 'knowledge')}>
               <div className="side-card-head">
                 <span>Knowledge</span>
                 <span className="row gap">
@@ -544,23 +651,6 @@ export function ProjectView(props: {
                   {artifacts.length > 12 && <li className="muted small">…and {artifacts.length - 12} more (export the project to get them all)</li>}
                 </ul>
               )}
-            </div>
-
-            <div className="side-card">
-              <div className="side-card-head">
-                <span>Folder</span>
-                <button
-                  className="link-btn"
-                  onClick={async () => {
-                    const d = await api.pickFolder('Working folder for chats in this project')
-                    if (d) void update({ cwd: d })
-                  }}
-                >
-                  Change
-                </button>
-              </div>
-              <div className="side-card-body mono small">{p.cwd || props.defaultCwd}</div>
-              <div className="muted small">New chats in this project work in this folder.</div>
             </div>
           </aside>
         </div>
