@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import type { AppSettings, Artifact, Attachment, ChatMessage, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, SessionMeta } from '../../../shared/types'
 import type { SessionRuntime } from '../App'
 import { api } from '../api'
+import { allStyles } from '../../../shared/styles'
 import { ArtifactPanel, type PanelState } from './ArtifactPanel'
+import { ChoiceDialog } from './ChoiceDialog'
 import { Icon } from './Icon'
 import { Menu, type MenuEntry } from './Menu'
 import { Turn, UserMessage, type TranscriptMode } from './MessageView'
@@ -107,6 +109,45 @@ export function ChatView(props: {
   const [atBottom, setAtBottom] = useState(true)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [panel, setPanel] = useState<PanelState | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const styleId = meta.style ?? props.settings.defaultStyle
+  const currentStyle = !styleId || styleId === 'default' ? undefined : allStyles(props.settings.customStyles).find((s) => s.id === styleId)
+  const [choice, setChoice] = useState<{ title: string; body: string; resolve: (v: 'undo' | 'keep' | null) => void } | null>(null)
+  useEffect(() => {
+    if (!notice) return
+    const t = setTimeout(() => setNotice(null), 8000)
+    return () => clearTimeout(t)
+  }, [notice])
+
+  /**
+   * Retry and Edit: go back to just before one of your messages and send it (or a new version) again.
+   * If Claude changed files after that point, you choose whether to undo those changes too.
+   */
+  const branchFrom = async (messageId: string, text: string): Promise<void> => {
+    const msg = history.find((m) => m.id === messageId)
+    if (busy || !msg?.forkAt || !text.trim()) return
+    let code = false
+    if (msg.uuid) {
+      const p = await api.rewindPreview(meta.id, messageId)
+      const files = p.canRewind ? (p.filesChanged?.length ?? 0) : 0
+      if (files > 0) {
+        const pick = await new Promise<'undo' | 'keep' | null>((resolve) =>
+          setChoice({
+            title: 'Undo the file changes too?',
+            body: `Claude changed ${files} file${files === 1 ? '' : 's'} after this message. Undo them before asking again, or keep them as they are?`,
+            resolve
+          })
+        )
+        setChoice(null)
+        if (!pick) return
+        code = pick === 'undo'
+      }
+    }
+    const r = await api.rewind(meta.id, { messageId, code, conversation: true })
+    if (!r.ok) return setNotice(r.error ?? 'Couldn’t go back to that message.')
+    stick.current = true
+    await api.send({ sessionId: meta.id, text: text.trim(), attachments: [] })
+  }
   // Open the side panel on an artifact as soon as Claude creates or updates it.
   useEffect(() => {
     // (only fresh changes: reopening an old chat shouldn't pop the panel open)
@@ -383,8 +424,17 @@ export function ChatView(props: {
               )}
               {segments.map((seg, i) => {
                 if (seg.kind === 'user')
-                  return <UserMessage key={seg.message.id} message={seg.message} onRewind={busy ? undefined : (id) => setRewind({ messageId: id })} />
+                  return (
+                    <UserMessage
+                      key={seg.message.id}
+                      message={seg.message}
+                      onRewind={busy ? undefined : (id) => setRewind({ messageId: id })}
+                      onEdit={busy ? undefined : (id, text) => void branchFrom(id, text)}
+                    />
+                  )
                 const isLast = i === segments.length - 1
+                const prev = segments[i - 1]
+                const retryFrom = isLast && !busy && prev?.kind === 'user' && prev.message.forkAt ? prev.message : undefined
                 return (
                   <Turn
                     key={seg.key}
@@ -394,6 +444,7 @@ export function ChatView(props: {
                     mode={props.transcript}
                     artifactInfo={artifactInfo}
                     onOpenArtifact={(id) => setPanel({ id, version: null })}
+                    onRetry={retryFrom ? () => void branchFrom(retryFrom.id, retryFrom.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')) : undefined}
                     footer={busy && isLast && !props.permission ? <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} /> : undefined}
                   />
                 )
@@ -415,6 +466,11 @@ export function ChatView(props: {
             {props.permission && (
               <div className="perm-dock">
                 <PermissionDialog key={props.permission.requestId} req={props.permission} onDone={props.onPermissionDone} />
+              </div>
+            )}
+            {notice && (
+              <div className="notice error chat-notice" role="alert" onClick={() => setNotice(null)}>
+                {notice}
               </div>
             )}
 
@@ -544,6 +600,30 @@ export function ChatView(props: {
               >
                 <Icon name="plus" size={18} />
               </button>
+              <Menu
+                className={'below-menu style-menu' + (styleId && styleId !== 'default' ? ' on' : '')}
+                direction="up"
+                title="Response style"
+                trigger={
+                  <>
+                    <Icon name="edit" size={15} />
+                    {currentStyle && <span className="style-name">{currentStyle.name}</span>}
+                  </>
+                }
+                entries={[
+                  { section: 'Response style' },
+                  { key: 'default', label: 'Normal', hint: 'Claude Code’s usual style', checked: !currentStyle, onSelect: () => void api.setStyle(meta.id, 'default') },
+                  ...allStyles(props.settings.customStyles).map((st) => ({
+                    key: st.id,
+                    label: st.name,
+                    hint: st.description,
+                    checked: currentStyle?.id === st.id,
+                    onSelect: () => void api.setStyle(meta.id, st.id)
+                  })),
+                  'divider',
+                  { key: 'manage', label: 'Create & edit styles…', onSelect: () => props.onOpenSettings('general') }
+                ]}
+              />
               {runtime.init && <McpButton sessionId={meta.id} servers={runtime.mcp} onOpenSettings={() => props.onOpenSettings('tools')} />}
               <div className="grow" />
               <span className="disclaimer">{escHint ? 'Press Esc again to rewind' : 'Claude is AI and can make mistakes.'}</span>
@@ -582,6 +662,17 @@ export function ChatView(props: {
             </div>
           </div>
 
+          {choice && (
+            <ChoiceDialog
+              title={choice.title}
+              body={choice.body}
+              choices={[
+                { value: 'keep', label: 'Keep changes' },
+                { value: 'undo', label: 'Undo changes', primary: true }
+              ]}
+              onChoose={(v) => choice.resolve(v)}
+            />
+          )}
           {rewind && (
             <RewindDialog
               sessionId={meta.id}

@@ -37,6 +37,16 @@ export interface AppSettings {
   replyFont: 'source-serif' | 'newsreader' | 'times' | 'georgia' | 'cambria' | 'sans'
   /** font for your messages, the reply box and the rest of the interface */
   uiFont: 'dm-sans' | 'system'
+  /** desktop notification when Claude finishes or needs you while LocalClaude isn't focused */
+  notifications: boolean
+  /** name new chats with a short AI-written title after the first reply (one small Haiku request) */
+  autoTitles: boolean
+  /** style for chats that haven't picked one ('' = Claude Code's normal style) */
+  defaultStyle: string
+  /** your own response styles, alongside the built-in ones */
+  customStyles: ResponseStyle[]
+  /** global shortcut that brings LocalClaude forward with a new chat ('' = off) */
+  quickShortcut: string
   /** Extra instructions appended to Claude Code's system prompt */
   appendSystemPrompt: string
 }
@@ -56,6 +66,10 @@ export interface SessionMeta {
   artifactCount?: number
   /** restored from an export without its Claude Code transcript: the old messages are sent as context on the next turn */
   imported?: boolean
+  /** response style for this chat (undefined = the default style, 'default' = Claude Code's normal style) */
+  style?: string
+  /** where the title came from: the first message ('auto'), Claude ('ai') or you ('user') */
+  titleSource?: 'auto' | 'ai' | 'user'
   createdAt: number
   updatedAt: number
   /** UUID of the last transcript entry of the latest finished turn (rewind fork point) */
@@ -260,6 +274,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
   replyFont: 'source-serif',
   uiFont: 'dm-sans',
+  notifications: true,
+  autoTitles: true,
+  defaultStyle: '',
+  customStyles: [],
+  quickShortcut: 'CommandOrControl+Alt+Space',
   appendSystemPrompt: ''
 }
 
@@ -386,4 +405,33 @@ export interface ImportResult {
   skipped: number
   /** chats whose Claude Code transcript isn't on this machine: they continue with the old messages as context */
   withoutTranscript: number
+}
+
+// ---------------------------------------------------------------- styles & usage
+/** A way of responding (tone, length, format), added to Claude's instructions. */
+export interface ResponseStyle {
+  id: string
+  name: string
+  description: string
+  prompt: string
+}
+
+/** One plan rate-limit window, e.g. the 5-hour session or the weekly limit. */
+export interface UsageWindow {
+  key: string
+  label: string
+  /** percent used, 0-100 */
+  utilization: number | null
+  /** ISO time the window resets */
+  resetsAt: string | null
+}
+
+/** Your Claude plan's usage limits, as Claude Code reports them. */
+export interface PlanUsage {
+  available: boolean
+  subscription: string | null
+  windows: UsageWindow[]
+  extra: { enabled: boolean; utilization: number | null; used: number | null; limit: number | null; currency: string | null } | null
+  fetchedAt: number
+  error?: string
 }

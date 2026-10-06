@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeTheme, Notification, protocol, screen, shell } from 'electron'
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,6 +23,10 @@ import { SessionManager } from './agent'
 import { renderArtifactPage } from './artifacts'
 import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, startLogin } from './claude'
 import { stopComputerHelper } from './computer'
+import { attachContextMenu } from './contextMenu'
+import { notificationFor } from './notify'
+import { generateTitle } from './titles'
+import { fitToScreens, loadWindowState, trackWindowState } from './windowState'
 import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, parseBackup, projectContext } from './exporter'
 import { addMemory, editMemory, getMemory, removeMemory, setMemory } from './memory'
 import { addProjectFiles, createProject, removeProjectFile, updateProject } from './projects'
@@ -35,7 +39,13 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'artifact', privileges: { standa
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 app.setName('LocalClaude')
+// A separate data folder, e.g. for a test profile (must happen before the store reads the path).
+if (process.env.LOCALCLAUDE_USER_DATA) app.setPath('userData', process.env.LOCALCLAUDE_USER_DATA)
 if (!app.requestSingleInstanceLock()) app.quit()
+// Windows groups notifications by this id; it matches the installer's appId.
+if (process.platform === 'win32') app.setAppUserModelId('com.parthasarathym.localclaude')
+/** End-to-end tests: hidden window, no global shortcut, no notifications. */
+const TEST_MODE = !!process.env.LOCALCLAUDE_TEST_MODE
 
 let win: BrowserWindow | null = null
 const store = new SecureStore()
@@ -51,10 +61,18 @@ function titleBarColors(dark: boolean): { color: string; symbolColor: string; he
   return dark ? { color: '#1a1a19', symbolColor: '#d9d7cf', height: TITLE_BAR_HEIGHT } : { color: '#f5f4ee', symbolColor: '#3d3c38', height: TITLE_BAR_HEIGHT }
 }
 
+const windowStateFile = (): string => join(app.getPath('userData'), 'window-state.json')
+
 function createWindow(): void {
+  const state = fitToScreens(
+    loadWindowState(windowStateFile()),
+    screen.getAllDisplays().map((d) => d.workArea)
+  )
   win = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    x: state.x,
+    y: state.y,
+    width: state.width,
+    height: state.height,
     minWidth: 760,
     minHeight: 520,
     title: 'LocalClaude',
@@ -68,10 +86,19 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      // tests render without showing a window (and can still take screenshots)
+      offscreen: TEST_MODE
     }
   })
-  win.once('ready-to-show', () => win?.show())
+  win.once('ready-to-show', () => {
+    if (TEST_MODE) return
+    if (state.maximized) win?.maximize()
+    win?.show()
+  })
+  trackWindowState(win, windowStateFile())
+  attachContextMenu(win, !!process.env.ELECTRON_RENDERER_URL)
+  win.on('focus', () => win?.flashFrame(false))
 
   // Never navigate the app window away; open links in the default browser.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -142,11 +169,16 @@ function registerIpc(): void {
   // ---- settings
   handle('settings:get', () => store.getSettings())
   handle('settings:set', (patch: Partial<AppSettings>) => {
+    const before = store.getSettings().quickShortcut
     const s = store.setSettings(patch)
     nativeTheme.themeSource = s.theme
-    manager.restartIdle()
+    if (s.quickShortcut !== before) applyQuickShortcut(s.quickShortcut)
+    // Only settings that change how Claude Code runs need idle chats to restart.
+    if (Object.keys(patch).some((k) => !UI_ONLY_SETTINGS.has(k as keyof AppSettings))) manager.restartIdle()
     return s
   })
+  handle('shortcut:status', () => shortcutStatus)
+  handle('usage:get', () => manager.usage())
 
   // ---- sessions
   handle('sessions:list', () => store.listSessions())
@@ -292,6 +324,7 @@ function registerIpc(): void {
   handle('chat:setModel', (id: string, model: string) => manager.setModel(id, model))
   handle('chat:setDirs', (id: string, dirs: string[]) => manager.setDirs(id, dirs))
   handle('models:list', () => manager.models)
+  handle('chat:setStyle', (id: string, style: string) => manager.setStyle(id, style))
   handle('chat:rewindPreview', (id: string, messageId: string) => manager.rewindPreview(id, messageId))
   handle('chat:rewind', (id: string, req: RewindRequest) => manager.rewind(id, req))
   handle('mcp:toggle', (id: string, name: string, enabled: boolean) => manager.toggleMcp(id, name, enabled))
@@ -352,24 +385,86 @@ function serveArtifacts(): void {
   })
 }
 
+/** Settings that only change the UI; changing them doesn't restart idle chats. */
+const UI_ONLY_SETTINGS = new Set<keyof AppSettings>([
+  'theme',
+  'replyFont',
+  'uiFont',
+  'notifications',
+  'autoTitles',
+  'quickShortcut',
+  'defaultCwd',
+  'defaultModel',
+  'defaultPermissionMode'
+])
+
+function bringToFront(): void {
+  if (!win || win.isDestroyed()) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+// ---- notifications: when Claude finishes or needs you while LocalClaude isn't in front
+function notify(e: AgentEvent): void {
+  if (e.type !== 'turn-done' && e.type !== 'permission') return
+  if (TEST_MODE || !store.lock.ok || !store.getSettings().notifications || !win || win.isDestroyed() || win.isFocused() || !Notification.isSupported()) return
+  const sessionId = e.type === 'permission' ? e.request.sessionId : e.sessionId
+  const meta = store.getSession(sessionId)
+  const last = [...manager.history(sessionId)].reverse().find((m) => m.role === 'assistant' && !m.parentToolUseId && m.parts.some((p) => p.kind === 'text' && p.text.trim()))
+  const n = notificationFor(e, { chatTitle: meta?.title, lastReply: last?.parts.map((p) => (p.kind === 'text' ? p.text : '')).join(' ') })
+  if (!n) return
+  const toast = new Notification({ title: n.title, body: n.body })
+  toast.on('click', () => {
+    bringToFront()
+    send('app:open-session', n.sessionId)
+  })
+  toast.show()
+  win.flashFrame(true)
+}
+
+// ---- global shortcut: bring LocalClaude forward with a new chat
+let shortcutStatus: { accelerator: string; ok: boolean } = { accelerator: '', ok: true }
+function applyQuickShortcut(accelerator: string): void {
+  globalShortcut.unregisterAll()
+  shortcutStatus = { accelerator, ok: true }
+  if (!accelerator || TEST_MODE) return
+  try {
+    shortcutStatus.ok = globalShortcut.register(accelerator, () => {
+      bringToFront()
+      send('app:new-chat', null)
+    })
+  } catch {
+    shortcutStatus.ok = false
+  }
+}
+
 app.whenReady().then(() => {
   store.open()
   if (store.lock.ok) nativeTheme.themeSource = store.getSettings().theme
-  manager = new SessionManager(store, (e: AgentEvent) => send('agent:event', e))
+  manager = new SessionManager(
+    store,
+    (e: AgentEvent) => {
+      send('agent:event', e)
+      notify(e)
+    },
+    {
+      titleFor: (user, reply) => (store.getSettings().autoTitles ? generateTitle(user, reply) : Promise.resolve(null)),
+      // the test stand-in for Claude Code doesn't write transcripts
+      transcriptExists: process.env.LOCALCLAUDE_FAKE_AGENT ? () => true : undefined
+    }
+  )
   registerIpc()
   serveArtifacts()
   createWindow()
+  if (store.lock.ok) applyQuickShortcut(store.getSettings().quickShortcut)
 })
 
-app.on('second-instance', () => {
-  if (win) {
-    if (win.isMinimized()) win.restore()
-    win.focus()
-  }
-})
+app.on('second-instance', () => bringToFront())
 
 app.on('before-quit', () => {
   manager?.shutdownAll()
   stopComputerHelper()
 })
+app.on('will-quit', () => globalShortcut.unregisterAll())
 app.on('window-all-closed', () => app.quit())

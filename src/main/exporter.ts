@@ -1,15 +1,13 @@
 // Export chats, projects and everything else to Markdown (single chat) or a ZIP of
 // Markdown files plus artifacts, knowledge files and memory. A backup JSON inside the
 // ZIP lets you import it back into LocalClaude, on this machine or another one.
-import { existsSync, readdirSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { ARTIFACT_LABEL, artifactExt, artifactLang, estimateTokens, fenced, safeFileName } from '../shared/format'
 import { editDiff, isArtifactTool, parsedInput, plural, short, stepText, summarize, type Step, type ToolPart } from '../shared/steps'
 import type { Artifact, ChatMessage, ExportOptions, ImportResult, MemoryItem, Project, ProjectContextUsage, SessionMeta } from '../shared/types'
 import { renderArtifactPage } from './artifacts'
 import { PROJECT_KNOWLEDGE_LIMIT_CHARS } from './limits'
 import type { SecureStore } from './store'
+import { transcriptIds } from './transcripts'
 import { readZip, type ZipEntry } from './zip'
 
 type Store = Pick<
@@ -427,21 +425,6 @@ export function parseBackup(buf: Buffer): Backup {
   const b = JSON.parse(json) as Backup
   if (b?.format !== 'localclaude-backup' || !Array.isArray(b.sessions)) throw new Error('This file is not a LocalClaude export.')
   return b
-}
-
-/** Ids of the Claude Code transcripts on this machine, so imported chats can resume them. */
-export function transcriptIds(claudeDir = join(homedir(), '.claude', 'projects')): Set<string> {
-  const ids = new Set<string>()
-  if (!existsSync(claudeDir)) return ids
-  for (const d of readdirSync(claudeDir, { withFileTypes: true })) {
-    if (!d.isDirectory()) continue
-    try {
-      for (const f of readdirSync(join(claudeDir, d.name))) if (f.endsWith('.jsonl')) ids.add(f.slice(0, -6))
-    } catch {
-      /* unreadable folder */
-    }
-  }
-  return ids
 }
 
 type ImportStore = Pick<

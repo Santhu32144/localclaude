@@ -1,6 +1,6 @@
 // Runs Claude Code sessions through the Agent SDK and translates its message
 // stream into UI events. One long-lived streaming query per open chat.
-import { query, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { randomUUID } from 'node:crypto'
 import { applyEvent, toolResultToText } from '../shared/reducer'
 import type {
@@ -11,7 +11,9 @@ import type {
   DiffHunk,
   McpStatus,
   MemoryItem,
+  PlanUsage,
   Project,
+  ResponseStyle,
   PermissionDecision,
   PermissionModeUI,
   RewindPreview,
@@ -22,8 +24,12 @@ import type {
 import { resolveClaudeBinary, subscriptionEnv } from './claude'
 import { ARTIFACT_TOOLS, createArtifactServer } from './artifacts'
 import { createComputerServer } from './computer'
+import { query } from './sdk'
 import { importedContext } from './exporter'
 import { PROJECT_KNOWLEDGE_LIMIT_CHARS } from './limits'
+import { transcriptExists } from './transcripts'
+import { fetchUsage } from './usage'
+import { resolveStyle } from '../shared/styles'
 import { MEMORY_TOOLS, createMemoryServer, memoryPrompt } from './memory'
 import type { SecureStore } from './store'
 
@@ -64,6 +70,14 @@ interface PendingPermission {
 
 type Emit = (e: AgentEvent) => void
 
+/** Things a session needs from outside, swappable in tests. */
+export interface SessionDeps {
+  /** whether Claude Code still has a session's transcript (it deletes them after 30 days by default) */
+  transcriptExists: (sdkSessionId: string, cwd: string) => boolean
+  /** a short title for a new chat from its first exchange, or null */
+  titleFor?: (firstUser: string, firstReply: string) => Promise<string | null>
+}
+
 class AgentSession {
   history: ChatMessage[]
   private q?: Query
@@ -81,13 +95,15 @@ class AgentSession {
   private lastEntry?: string
   /** whether this turn showed anything (assistant text, tools or command output) */
   private turnHadOutput = false
+  private titleAttempts = 0
 
   constructor(
     public meta: SessionMeta,
     private store: SecureStore,
     private emitRaw: Emit,
     private settings: () => AppSettings,
-    private onModels: (models: { value: string; displayName: string; description: string }[]) => void
+    private onModels: (models: { value: string; displayName: string; description: string }[]) => void,
+    private deps: SessionDeps
   ) {
     this.history = store.loadHistory(meta.id)
   }
@@ -174,7 +190,13 @@ class AgentSession {
       systemPrompt: {
         type: 'preset',
         preset: 'claude_code',
-        append: systemAppend(s.appendSystemPrompt, project, this.store, s.memory ? { global: this.store.getGlobalMemory() } : null)
+        append: systemAppend(
+          s.appendSystemPrompt,
+          project,
+          this.store,
+          s.memory ? { global: this.store.getGlobalMemory() } : null,
+          resolveStyle(this.meta.style, s.defaultStyle, s.customStyles)
+        )
       },
       allowedTools: autoAllowed.length ? autoAllowed : undefined,
       // LocalClaude keeps memory and artifacts itself, encrypted on this machine. Claude Code's own
@@ -210,7 +232,8 @@ class AgentSession {
       for await (const msg of q) this.handle(msg)
     } catch (err) {
       const text = err instanceof Error ? err.message : String(err)
-      if (!/abort/i.test(text)) this.emit({ type: 'error', sessionId: this.meta.id, text: friendlyError(text) })
+      // An error result was already shown when its result message arrived; the SDK then throws the same error.
+      if (!/abort/i.test(text) && !/returned an error result/i.test(text)) this.emit({ type: 'error', sessionId: this.meta.id, text: friendlyError(text) })
     } finally {
       if (this.q === q) {
         this.q = undefined
@@ -243,8 +266,31 @@ class AgentSession {
     }
   }
 
+  /**
+   * Claude Code deleted this chat's transcript (it keeps them 30 days by default), so it can't resume.
+   * Continue the chat the way imported chats do: its earlier messages go to Claude as context once.
+   */
+  private recoverMissingTranscript(): void {
+    const hadMessages = this.history.some((m) => m.role === 'user')
+    // file checkpoints went with the transcript, so rewind can't reach these messages any more
+    this.history = this.history.map((m) => (m.role === 'user' && (m.uuid || m.forkAt) ? { ...m, uuid: undefined, forkAt: undefined } : m))
+    this.touchMeta({ sdkSessionId: undefined, tip: undefined, resumeAt: undefined, imported: hadMessages || undefined })
+    this.emitRaw({ type: 'history-reset', sessionId: this.meta.id, history: this.history })
+    this.emit({
+      type: 'message-start',
+      sessionId: this.meta.id,
+      message: {
+        id: 'sys-' + randomUUID(),
+        role: 'system',
+        parts: [{ kind: 'text', text: 'Claude Code had cleaned up this chat’s saved session (it keeps them 30 days by default), so your earlier messages are sent to Claude as context.' }],
+        ts: Date.now()
+      }
+    })
+  }
+
   // ---------------------------------------------------------------- input
   send(p: SendPayload): void {
+    if (!this.q && this.meta.sdkSessionId && !this.deps.transcriptExists(this.meta.sdkSessionId, this.meta.cwd)) this.recoverMissingTranscript()
     const content: SDKUserMessage['message']['content'] = []
     for (const a of p.attachments) {
       content.push({
@@ -322,6 +368,41 @@ class AgentSession {
   /** Restart so changed settings (MCP servers, Chrome, effort…) apply. */
   restartIfIdle(): void {
     if (this.q && !this.running) this.shutdown()
+  }
+
+  /** Change this chat's response style (part of the system prompt, so Claude Code restarts when idle). */
+  setStyle(style: string): void {
+    this.touchMeta({ style })
+    if (!this.q) return
+    if (this.running) this.restartAfterTurn = true
+    else this.shutdown()
+  }
+
+  /** After the first exchange, swap the first-message title for a short AI-written one (the Claude app does this). */
+  private maybeNameChat(): void {
+    if (this.meta.titleSource !== 'auto' || !this.deps.titleFor || this.titleAttempts >= 2) return
+    const firstUser = this.history.find((m) => m.role === 'user')
+    const firstReply = this.history.find((m) => m.role === 'assistant' && !m.parentToolUseId && m.parts.some((p) => p.kind === 'text' && p.text.trim()))
+    const userText = firstUser?.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('').trim() ?? ''
+    if (!userText || userText.startsWith('/') || !firstReply) return
+    this.titleAttempts++
+    const replyText = firstReply.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')
+    void this.deps
+      .titleFor(userText, replyText)
+      .then((title) => {
+        // you may have renamed it meanwhile
+        if (title && this.meta.titleSource === 'auto') this.touchMeta({ title, titleSource: 'ai' })
+      })
+      .catch(() => {})
+  }
+
+  hasProcess(): boolean {
+    return !!this.q
+  }
+
+  /** Plan usage, read through this chat's running Claude Code process. */
+  usageRaw(): ReturnType<Query['usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET']> {
+    return this.q!.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })
   }
 
   // ---------------------------------------------------------------- context, commands, MCP
@@ -677,6 +758,11 @@ class AgentSession {
         let errorText: string | undefined
         if (msg.subtype !== 'success') errorText = (msg as { errors?: string[] }).errors?.join('\n') || msg.subtype
         else if (msg.is_error) errorText = msg.result
+        if (errorText && /No conversation found with session ID/i.test(errorText)) {
+          // The transcript vanished after this chat checked for it: recover so the next message works.
+          this.recoverMissingTranscript()
+          errorText = 'Claude Code had already cleaned up this chat’s saved session. Send your message again: your earlier messages will be included as context.'
+        }
         if (this.interrupted) {
           this.interrupted = false
           errorText = undefined
@@ -714,6 +800,7 @@ class AgentSession {
         this.touchMeta(this.lastEntry ? { tip: this.lastEntry } : {})
         this.refreshContext()
         this.refreshMcp()
+        if (!isError) this.maybeNameChat()
         if (this.restartAfterTurn) {
           this.restartAfterTurn = false
           this.shutdown()
@@ -744,7 +831,8 @@ export function systemAppend(
   personal: string,
   project: Project | undefined,
   store: Pick<SecureStore, 'loadProjectFiles'>,
-  memory: { global: MemoryItem[] } | null = null
+  memory: { global: MemoryItem[] } | null = null,
+  style?: ResponseStyle
 ): string | undefined {
   const parts: string[] = []
   if (personal?.trim()) parts.push(personal.trim())
@@ -769,6 +857,7 @@ export function systemAppend(
     parts.push("This chat is part of the user's project below. Follow its instructions and use its knowledge files when relevant.\n" + lines.join('\n'))
   }
   if (memory) parts.push(memoryPrompt(memory.global, project ? { name: project.name, items: project.memory ?? [] } : undefined))
+  if (style) parts.push(`<response_style name="${style.name}">\nThe user chose this style for your replies:\n${style.prompt.trim()}\n</response_style>`)
   return parts.length ? parts.join('\n\n') : undefined
 }
 
@@ -797,24 +886,44 @@ function friendlyError(text: string): string {
 export class SessionManager {
   private sessions = new Map<string, AgentSession>()
   models: { value: string; displayName: string; description: string }[] = []
+  private deps: SessionDeps
 
   constructor(
     private store: SecureStore,
-    private emit: Emit
-  ) {}
+    private emit: Emit,
+    deps: Partial<SessionDeps> = {}
+  ) {
+    this.deps = { transcriptExists: deps.transcriptExists ?? transcriptExists, titleFor: deps.titleFor }
+  }
 
   private get(id: string): AgentSession {
     let s = this.sessions.get(id)
     if (!s) {
       const meta = this.store.getSession(id)
       if (!meta) throw new Error('Unknown session ' + id)
-      s = new AgentSession(meta, this.store, this.emit, () => this.store.getSettings(), (m) => {
-        this.models = m
-        this.emit({ type: 'status', sessionId: id, status: s!.running ? 'running' : 'idle' })
-      })
+      s = new AgentSession(
+        meta,
+        this.store,
+        this.emit,
+        () => this.store.getSettings(),
+        (m) => {
+          this.models = m
+          this.emit({ type: 'status', sessionId: id, status: s!.running ? 'running' : 'idle' })
+        },
+        this.deps
+      )
       this.sessions.set(id, s)
     }
     return s
+  }
+
+  /** Plan usage: through a running chat if there is one, else a short-lived Claude Code process. */
+  usage(): Promise<PlanUsage> {
+    const live = [...this.sessions.values()].find((s) => s.hasProcess())
+    return fetchUsage(live ? () => live.usageRaw() : undefined)
+  }
+  setStyle(id: string, style: string): void {
+    this.get(id).setStyle(style)
   }
 
   create(cwd?: string, projectId?: string): SessionMeta {
@@ -828,6 +937,7 @@ export class SessionManager {
       additionalDirs: [],
       model: st.defaultModel,
       permissionMode: st.defaultPermissionMode,
+      titleSource: 'auto',
       createdAt: Date.now(),
       updatedAt: Date.now()
     }
@@ -878,7 +988,7 @@ export class SessionManager {
     const s = this.get(id)
     // The working folder can only change before the first message (the transcript is tied to it).
     if (patch.cwd && s.meta.sdkSessionId) delete patch.cwd
-    s.meta = { ...s.meta, ...patch }
+    s.meta = { ...s.meta, ...patch, ...(patch.title ? { titleSource: 'user' as const } : {}) }
     this.store.upsertSession(s.meta)
     // Moving a chat in or out of a project changes its instructions: restart Claude Code when idle.
     if ('projectId' in patch) s.restartIfIdle()

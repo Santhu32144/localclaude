@@ -288,7 +288,8 @@ export const Turn = memo(function Turn({
   nested = false,
   footer,
   artifactInfo,
-  onOpenArtifact
+  onOpenArtifact,
+  onRetry
 }: {
   messages: ChatMessage[]
   childrenOf: (toolUseId: string) => ChatMessage[]
@@ -299,10 +300,16 @@ export const Turn = memo(function Turn({
   /** title/type of an artifact by id, for update calls that only carry the id */
   artifactInfo?: (id: string) => { title: string; type: ArtifactType; versions: number } | undefined
   onOpenArtifact?: (id: string) => void
+  /** regenerate this reply (only offered on the last one) */
+  onRetry?: () => void
 }) {
   const blocks = toBlocks(messages)
+  const replyText = blocks
+    .map((b) => (b.kind === 'text' || b.kind === 'output' ? b.text : ''))
+    .filter(Boolean)
+    .join('\n\n')
   return (
-    <div className={'turn' + (nested ? ' nested' : '')}>
+    <div className={'turn' + (nested ? ' nested' : '')} data-turn={messages[0]?.id}>
       {blocks.map((b, i) => {
         if (b.kind === 'text') return <Markdown key={b.key} text={b.text} />
         if (b.kind === 'output')
@@ -325,22 +332,103 @@ export const Turn = memo(function Turn({
         )
       })}
       {footer}
+      {!live && !nested && (replyText || onRetry) && (
+        <div className="msg-actions turn-actions">
+          {replyText && <CopyButton text={replyText} title="Copy reply" />}
+          {onRetry && (
+            <button className="icon-btn" title="Retry: ask again for a new reply" onClick={onRetry}>
+              <Icon name="retry" size={14} />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 })
 
-export const UserMessage = memo(function UserMessage({ message, onRewind }: { message: ChatMessage; onRewind?: (messageId: string) => void }) {
-  const text = message.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')
+/** Copy button that briefly shows a check mark. */
+export function CopyButton({ text, title = 'Copy' }: { text: string; title?: string }) {
+  const [copied, setCopied] = useState(false)
   return (
-    <div className="msg-user">
-      {onRewind && (message.uuid || message.forkAt) && (
-        <button className="rewind-btn" onClick={() => onRewind(message.id)} title="Rewind to before this message (Esc Esc)">
-          <Icon name="rewind" size={14} />
-        </button>
-      )}
-      <div className="bubble">
-        {message.images ? <div className="muted small">📎 {plural(message.images, 'image')}</div> : null}
-        <div className="user-text">{text}</div>
+    <button
+      className="icon-btn"
+      title={copied ? 'Copied' : title}
+      onClick={() => {
+        void navigator.clipboard.writeText(text)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1200)
+      }}
+    >
+      <Icon name={copied ? 'check' : 'copy'} size={14} />
+    </button>
+  )
+}
+
+export const UserMessage = memo(function UserMessage({
+  message,
+  onRewind,
+  onEdit
+}: {
+  message: ChatMessage
+  onRewind?: (messageId: string) => void
+  /** resend this message with new text (the conversation continues from before it) */
+  onEdit?: (messageId: string, text: string) => void
+}) {
+  const text = message.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')
+  const [draft, setDraft] = useState<string | null>(null)
+  const canEdit = !!onEdit && !!message.forkAt
+  const save = (): void => {
+    if (draft === null || !draft.trim()) return
+    onEdit?.(message.id, draft.trim())
+    setDraft(null)
+  }
+  return (
+    <div className="msg-user" data-msg={message.id}>
+      <div className="user-col">
+        {draft !== null ? (
+          <div className="bubble editing">
+            <textarea
+              className="edit-input"
+              autoFocus
+              value={draft}
+              rows={Math.min(12, Math.max(2, draft.split('\n').length))}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setDraft(null)
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) save()
+              }}
+            />
+            <div className="row gap end">
+              <span className="muted small grow">{message.images ? 'Images aren’t sent again. ' : ''}Ctrl+Enter to send</span>
+              <button className="btn ghost" onClick={() => setDraft(null)}>
+                Cancel
+              </button>
+              <button className="btn primary" disabled={!draft.trim()} onClick={save}>
+                Send
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="bubble">
+            {message.images ? <div className="muted small">📎 {plural(message.images, 'image')}</div> : null}
+            <div className="user-text">{text}</div>
+          </div>
+        )}
+        {draft === null && (
+          <div className="msg-actions">
+            <CopyButton text={text} />
+            {canEdit && (
+              <button className="icon-btn" title="Edit and resend" onClick={() => setDraft(text)}>
+                <Icon name="edit" size={14} />
+              </button>
+            )}
+            {onRewind && (message.uuid || message.forkAt) && (
+              <button className="icon-btn" onClick={() => onRewind(message.id)} title="Rewind to before this message (Esc Esc)">
+                <Icon name="rewind" size={14} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

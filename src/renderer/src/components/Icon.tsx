@@ -15,6 +15,7 @@ const PATHS: Record<string, string> = {
   sidebar: 'M4 4h16v16H4z M9.5 4v16',
   compose: 'M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z',
   rewind: 'M3 12a9 9 0 1 0 3-6.7L3 8 M3 3v5h5',
+  retry: 'M21 12a9 9 0 1 1-3-6.7L21 8 M21 3v5h-5',
   chevron: 'M9 6l6 6-6 6',
   chevronDown: 'M6 9l6 6 6-6',
   project: 'M3 7h18v4H3z M5 11v8h14v-8 M10 15h4',

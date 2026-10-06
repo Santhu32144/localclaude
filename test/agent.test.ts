@@ -6,6 +6,16 @@ import { ARTIFACT_TOOLS, createArtifactServer, renderArtifactPage } from '../src
 import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup } from '../src/main/exporter'
 import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
 import { createZip, readZip } from '../src/main/zip'
+import { contextMenuTemplate } from '../src/main/contextMenu'
+import { notificationFor } from '../src/main/notify'
+import { cleanTitle } from '../src/main/titles'
+import { projectDirName, transcriptExists } from '../src/main/transcripts'
+import { mapUsage } from '../src/main/usage'
+import { fitToScreens } from '../src/main/windowState'
+import { resolveStyle } from '../src/shared/styles'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { DEFAULT_EXPORT_OPTIONS } from '../src/shared/types'
 import type { AgentEvent, ChatMessage, SessionMeta, AppSettings } from '../src/shared/types'
 import { DEFAULT_SETTINGS } from '../src/shared/types'
@@ -27,7 +37,8 @@ const store: any = {
 }
 const events: AgentEvent[] = []
 let rendererView: ChatMessage[] = []
-const mgr = new SessionManager(store, (e) => { events.push(e); if ('sessionId' in e) rendererView = applyEvent(rendererView, e) })
+// these tests use made-up Claude Code session ids, so pretend their transcripts exist
+const mgr = new SessionManager(store, (e) => { events.push(e); if ('sessionId' in e) rendererView = applyEvent(rendererView, e) }, { transcriptExists: () => true })
 
 async function synthetic() {
   const meta = mgr.create(process.cwd())
@@ -369,6 +380,110 @@ function exportAndImport() {
   console.log('✓ export: chat Markdown (summary/full/thinking/versions), ZIP, project + full exports, backup import round trip')
 }
 
+async function reliabilityAndUx() {
+  // --- Claude Code deleted the transcript (30-day cleanup): the chat continues with its history as context
+  const ev: AgentEvent[] = []
+  const st: any = { ...store, getSettings: store.getSettings, getSession: store.getSession, upsertSession: store.upsertSession }
+  const titles: string[] = []
+  const gone = new SessionManager(st, (e) => ev.push(e), {
+    transcriptExists: () => false,
+    titleFor: async (u) => (titles.push(u), 'Planning a garden')
+  })
+  const meta = gone.create(process.cwd())
+  const s: any = (gone as any).get(meta.id)
+  const sent: any[] = []
+  s.ensureStarted = () => { s.queue ??= { push: (m: any) => sent.push(m), close() {} } }
+  s.history = [
+    { id: 'u-old', role: 'user', uuid: 'U-OLD', forkAt: 'start', ts: 1, parts: [{ kind: 'text', text: 'What should I plant in spring?' }] },
+    { id: 'a-old', role: 'assistant', ts: 2, parts: [{ kind: 'text', text: 'Peas and lettuce do well.' }] }
+  ]
+  s.meta = { ...s.meta, sdkSessionId: 'deleted-session', tip: 'T1', title: 'What should I plant in spring?', titleSource: 'user' }
+  gone.send({ sessionId: meta.id, text: 'And in summer?', attachments: [] })
+  assert.equal(s.meta.sdkSessionId, undefined, 'stale session id dropped'); assert.equal(s.meta.imported, true)
+  assert.match(sent[0].message.content[0].text, /<previous_conversation>[\s\S]*Peas and lettuce[\s\S]*<\/previous_conversation>/)
+  assert.equal(sent[0].message.content[1].text, 'And in summer?')
+  assert.equal(s.history.find((m: any) => m.id === 'u-old').uuid, undefined, 'old checkpoints are gone with the transcript')
+  assert.equal(s.history.at(-1).forkAt, 'start', 'rewinding the new message starts fresh')
+  assert.ok(s.history.some((m: any) => m.role === 'system' && /cleaned up/.test(m.parts[0].text)))
+  // ...and if it vanishes mid-way, the error is explained and the chat recovers for the next message
+  s.meta = { ...s.meta, sdkSessionId: 'another-gone', imported: undefined }
+  s.handle({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['No conversation found with session ID: another-gone'], usage: {}, duration_ms: 1, num_turns: 0 })
+  assert.equal(s.meta.sdkSessionId, undefined); assert.equal(s.meta.imported, true)
+  assert.match(ev.filter((e) => e.type === 'error').at(-1)!.text as string, /Send your message again/)
+
+  // --- AI titles: only for chats still named after their first message, and never over your rename
+  const fresh = gone.create(process.cwd())
+  const f: any = (gone as any).get(fresh.id)
+  f.ensureStarted = () => { f.queue ??= { push: () => {}, close() {} } }
+  gone.send({ sessionId: fresh.id, text: 'help me plan my vegetable garden', attachments: [] })
+  f.handle({ type: 'assistant', uuid: 'x', parent_tool_use_id: null, message: { id: 'g1', content: [{ type: 'text', text: 'Sure! Start with the sunniest spot.' }] } })
+  f.handle({ type: 'result', subtype: 'success', is_error: false, result: 'ok', usage: {}, duration_ms: 1, num_turns: 1 })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(f.meta.title, 'Planning a garden'); assert.equal(f.meta.titleSource, 'ai'); assert.deepEqual(titles, ['help me plan my vegetable garden'])
+  gone.updateMeta(fresh.id, { title: 'My garden' })
+  assert.equal(f.meta.titleSource, 'user', 'renaming marks the title as yours')
+  assert.equal(cleanTitle('"Title: Planning a Vegetable Garden."'), 'Planning a Vegetable Garden')
+  assert.equal(cleanTitle('**Kubernetes pod restart loop**\nextra'), 'Kubernetes pod restart loop')
+  assert.equal(cleanTitle(' '), null)
+
+  // --- styles: chosen per chat, added to the system prompt
+  gone.setStyle(fresh.id, 'concise')
+  assert.equal(f.meta.style, 'concise')
+  const opts = f.buildOptions()
+  assert.match(opts.systemPrompt.append, /<response_style name="Concise">/)
+  gone.setStyle(fresh.id, 'default')
+  assert.ok(!(f.buildOptions().systemPrompt.append ?? '').includes('response_style'))
+  assert.equal(resolveStyle(undefined, 'learning', [])?.name, 'Learning', 'falls back to the default style')
+  assert.equal(resolveStyle(undefined, 'mine', [{ id: 'mine', name: 'Mine', description: '', prompt: 'p' }])?.prompt, 'p')
+
+  // --- transcript lookup on disk
+  const dir = mkdtempSync(join(tmpdir(), 'lc-tx-'))
+  mkdirSync(join(dir, projectDirName('C:\\Users\\me\\code')), { recursive: true })
+  writeFileSync(join(dir, projectDirName('C:\\Users\\me\\code'), 'abc.jsonl'), '{}')
+  mkdirSync(join(dir, 'shortened-long-path-1234'))
+  writeFileSync(join(dir, 'shortened-long-path-1234', 'def.jsonl'), '{}')
+  assert.equal(projectDirName('C:\\Users\\me\\code'), 'C--Users-me-code')
+  assert.ok(transcriptExists('abc', 'C:\\Users\\me\\code', dir)); assert.ok(transcriptExists('def', 'D:\\elsewhere', dir), 'found in another folder')
+  assert.ok(!transcriptExists('zzz', 'C:\\Users\\me\\code', dir)); assert.ok(!transcriptExists('abc', 'x', join(dir, 'missing')))
+  rmSync(dir, { recursive: true, force: true })
+
+  // --- notifications
+  const done: any = { type: 'turn-done', sessionId: 's', isError: false, stats: {} }
+  assert.deepEqual(notificationFor(done, { chatTitle: 'Garden', lastReply: 'Plant   peas\nfirst.' }), { sessionId: 's', title: 'Garden', body: 'Plant peas first.' })
+  assert.equal(notificationFor({ ...done, isError: true }, {})!.body, 'Claude stopped with an error.')
+  const ask: any = { type: 'permission', request: { sessionId: 's', toolName: 'AskUserQuestion', input: {} } }
+  assert.equal(notificationFor(ask, { chatTitle: 'Garden' })!.body, 'Claude has a question for you.')
+  assert.equal(notificationFor({ type: 'status', sessionId: 's', status: 'idle' } as any, {}), null)
+
+  // --- right-click menu
+  const flags = { canUndo: true, canRedo: false, canCut: true, canCopy: true, canPaste: true, canSelectAll: true, canDelete: true, canEditRichly: false }
+  const base = { isEditable: false, selectionText: '', misspelledWord: '', dictionarySuggestions: [] as string[], linkURL: '', mediaType: 'none', srcURL: '', editFlags: flags, x: 0, y: 0 } as any
+  const noop = { replaceMisspelling: () => {}, addToDictionary: () => {}, copyImage: () => {} }
+  const labels = (t: any[]) => t.map((i) => i.label ?? i.role ?? i.type)
+  assert.deepEqual(labels(contextMenuTemplate({ ...base, isEditable: true, misspelledWord: 'teh', dictionarySuggestions: ['the', 'tech'] }, noop)), ['the', 'tech', 'Add to dictionary', 'separator', 'undo', 'redo', 'separator', 'cut', 'copy', 'paste', 'Paste as plain text', 'separator', 'selectAll'])
+  assert.deepEqual(labels(contextMenuTemplate({ ...base, selectionText: 'hello' }, noop)), ['copy'])
+  assert.deepEqual(labels(contextMenuTemplate({ ...base, linkURL: 'https://x.dev' }, noop)), ['Open link in browser', 'Copy link address'])
+  assert.deepEqual(contextMenuTemplate({ ...base, linkURL: 'javascript:alert(1)' }, noop), [], 'only web links get link actions')
+
+  // --- window position: kept when visible, dropped when the monitor is gone
+  const screens = [{ x: 0, y: 0, width: 1920, height: 1040 }]
+  assert.deepEqual(fitToScreens({ x: 100, y: 50, width: 1200, height: 800, maximized: false }, screens), { x: 100, y: 50, width: 1200, height: 800, maximized: false })
+  assert.deepEqual(fitToScreens({ x: 3000, y: 50, width: 1200, height: 800, maximized: true }, screens), { width: 1200, height: 800, maximized: true })
+  assert.equal(fitToScreens({ width: 5000, height: 4000, maximized: false }, screens).width, 1920, 'never bigger than the screen')
+
+  // --- usage
+  const u = mapUsage({
+    subscription_type: 'max',
+    rate_limits_available: true,
+    rate_limits: { five_hour: { utilization: 42, resets_at: '2026-10-06T20:00:00Z' }, seven_day: { utilization: 10, resets_at: null }, seven_day_opus: null, model_scoped: [{ display_name: 'Fable', utilization: 3, resets_at: null }] },
+    session: {} as any,
+    behaviors: null
+  } as any)
+  assert.deepEqual(u.windows.map((w) => [w.label, w.utilization]), [['Current session (5-hour limit)', 42], ['Weekly · all models', 10], ['Weekly · Fable', 3]])
+  assert.equal(mapUsage({ rate_limits_available: false } as any).available, false)
+  console.log('✓ reliability & UX: 30-day transcript recovery, AI titles, styles, notifications, right-click menu, window state, usage')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -408,6 +523,7 @@ await artifactTool()
 projectPrompt()
 await memoryTool()
 exportAndImport()
+await reliabilityAndUx()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

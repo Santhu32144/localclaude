@@ -359,6 +359,10 @@ export default function App() {
     setSettings(await api.setSettings(patch))
   }, [])
 
+  // a notification was clicked / the global shortcut was pressed
+  useEffect(() => api.onOpenSession((id) => openChat(id)), [openChat])
+  useEffect(() => api.onNewChat(() => void newChat()), [newChat])
+
   // keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {

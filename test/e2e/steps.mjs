@@ -1,0 +1,176 @@
+// End-to-end steps, run in order against one app instance (see run.mjs). Each step drives the real UI.
+const lastTurnId = "(__t.qa('.turn').at(-1)?.dataset.turn ?? '')"
+
+export const steps = [
+  {
+    name: 'boots with no chats',
+    run: async ({ waitFor, page }) => {
+      await waitFor('sidebar', "!!__t.q('.side-new')")
+      if (await page("__t.qa('.session-item').length")) throw new Error('expected no chats')
+    }
+  },
+  {
+    name: 'new chat gets a streamed reply',
+    run: async (c) => {
+      await c.page("__t.click(__t.q('.side-new'))")
+      await c.send('hello there', 'Echo: hello there')
+    }
+  },
+  {
+    name: 'chat gets an AI title',
+    run: (c) => c.waitFor('AI title', "__t.qa('.session-title').some((e) => e.textContent.startsWith('Chat about hello'))")
+  },
+  {
+    name: 'edit a message and resend it',
+    run: async (c) => {
+      const before = await c.page("__t.q('.msg-user').dataset.msg")
+      await c.page(`__t.click(__t.q('.msg-user .msg-actions button[title="Edit and resend"]'))`)
+      await c.waitFor('editor', "!!__t.q('.edit-input')")
+      await c.page("__t.setValue(__t.q('.edit-input'), 'hello again')")
+      await c.page("__t.click(__t.byText('.bubble.editing .btn', 'Send'))")
+      await c.waitFor('new reply', `__t.q('.msg-user')?.dataset.msg !== ${JSON.stringify(before)} && __t.qa('.turn').some((t) => t.innerText.includes('Echo: hello again')) && !__t.q('.send.stop')`, 15000)
+      if ((await c.page("__t.qa('.msg-user').length")) !== 1) throw new Error('expected one message after editing')
+      if (await c.page("document.querySelector('.messages').innerText.includes('Echo: hello there')")) throw new Error('the old reply is still shown')
+    }
+  },
+  {
+    name: 'retry the last reply',
+    run: async (c) => {
+      const before = await c.page(lastTurnId)
+      await c.page(`__t.click(__t.q('.turn-actions button[title^="Retry"]'))`)
+      await c.waitFor('a new reply', `${lastTurnId} !== ${JSON.stringify(before)} && __t.qa('.turn').at(-1).innerText.includes('Echo: hello again') && !__t.q('.send.stop')`, 15000)
+      if ((await c.page("__t.qa('.turn').length")) !== 1) throw new Error('retry should replace the reply, not add one')
+    }
+  },
+  {
+    name: 'artifact opens in the side panel',
+    run: async (c) => {
+      await c.send('make artifact please', 'I made a demo page')
+      await c.waitFor('artifact card', "!!__t.q('.artifact-chip')")
+      await c.waitFor('panel with a preview', "!!__t.q('.artifact-panel .artifact-frame')")
+      await c.shot("artifact-panel")
+      await c.waitFor('artifact icon in the sidebar', "!!__t.q('.session-item .item-icon')")
+      await c.page(`__t.click(__t.q('.artifact-head button[title="Close"]'))`)
+      await c.waitFor('panel closed', "!__t.q('.artifact-panel')")
+    }
+  },
+  {
+    name: 'memory is saved and shown in settings',
+    run: async (c) => {
+      await c.send('remember my favorite color is teal', 'Noted.')
+      await c.openSettings('Memory & data')
+      await c.waitFor('memory item', "__t.text('.memory-list').includes('my favorite color is teal')")
+      await c.closeModal()
+    }
+  },
+  {
+    name: 'permission prompt: allow once',
+    run: async (c) => {
+      await c.send('ask permission now')
+      await c.waitFor('permission card', "!!__t.q('.perm-card')")
+      await c.page("__t.click(__t.byText('.perm-card .btn', 'Allow once'))")
+      await c.waitFor('command ran', "__t.qa('.turn').some((t) => t.innerText.includes('Permission granted')) && !__t.q('.send.stop')", 15000)
+    }
+  },
+  {
+    name: 'pick a response style',
+    run: async (c) => {
+      await c.page("__t.click(__t.q('.style-menu .menu-trigger'))")
+      await c.menuItem('Concise')
+      await c.waitFor('style shown', "__t.text('.style-menu .style-name') === 'Concise'")
+      await c.shot("style-chosen")
+    }
+  },
+  {
+    name: 'usage page shows plan limits',
+    run: async (c) => {
+      await c.openSettings('Usage')
+      await c.waitFor('usage rows', "__t.text('.usage').includes('Current session (5-hour limit)') && __t.text('.usage').includes('37% used')")
+      await c.shot("usage")
+      await c.closeModal()
+    }
+  },
+  {
+    name: 'file edit shows a diff card',
+    run: async (c) => {
+      await c.send('edit file please', 'Edited app.ts')
+      await c.waitFor('file card', "__t.text('.file-card').includes('app.ts')")
+    }
+  },
+  {
+    name: 'stop a running reply',
+    run: async (c) => {
+      await c.page("__t.setValue(__t.q('.composer-input'), 'slow please'); __t.key(__t.q('.composer-input'), 'Enter')")
+      await c.waitFor('working', "!!__t.q('.send.stop')")
+      await c.page("__t.click(__t.q('.send.stop'))")
+      await c.waitFor('stopped', "__t.qa('.sys-note').some((n) => n.textContent.includes('Stopped')) && !__t.q('.send.stop')")
+      await c.shot("chat-after-stop")
+    }
+  },
+  {
+    name: 'Esc Esc opens rewind',
+    run: async (c) => {
+      await c.page("__t.key(__t.q('.composer-input'), 'Escape'); __t.key(__t.q('.composer-input'), 'Escape')")
+      await c.waitFor('rewind dialog', "!!__t.q('.rewind-card')")
+      await c.page("__t.key(window, 'Escape')")
+      await c.waitFor('closed', "!__t.q('.rewind-card')")
+    }
+  },
+  {
+    name: 'export the chat as Markdown',
+    run: async (c) => {
+      const out = c.file('chat.md')
+      c.answers.push(out)
+      await c.page("__t.key(window, 'E', { ctrlKey: true, shiftKey: true })")
+      await c.waitFor('export dialog', "!!__t.q('.export-dialog')")
+      await c.page("__t.click(__t.byText('.export-dialog .btn', 'Export Markdown'))")
+      await c.waitFor('exported', "__t.text('.export-dialog').includes('Exported')")
+      const md = c.read(out).toString()
+      if (!md.includes('## Claude') || !md.includes('Echo: hello again') || !md.includes('Demo page')) throw new Error('chat.md is missing content')
+      await c.page("__t.click(__t.byText('.export-dialog .btn', 'Done'))")
+    }
+  },
+  {
+    name: 'export everything as a ZIP and import it back',
+    run: async (c) => {
+      const zip = c.file('all.zip')
+      c.answers.push(zip)
+      await c.page("__t.key(window, 'E', { ctrlKey: true, shiftKey: true })")
+      await c.waitFor('export dialog', "!!__t.q('.export-dialog')")
+      await c.page("__t.click(__t.byText('.export-scopes .option', 'Everything'))")
+      await c.page("__t.click(__t.byText('.export-dialog .btn', 'Export ZIP'))")
+      await c.waitFor('exported', "__t.text('.export-dialog').includes('Exported')")
+      if (c.read(zip).subarray(0, 2).toString() !== 'PK') throw new Error('not a ZIP file')
+      await c.page("__t.click(__t.byText('.export-dialog .btn', 'Done'))")
+      c.answers.push(zip)
+      await c.page("__t.click(__t.q('.side-titlebar .menu-trigger'))")
+      await c.menuItem('Import from an export')
+      await c.waitFor('import result', "__t.text('.toast').includes('Skipped')")
+    }
+  },
+  {
+    name: 'create a project and chat in it',
+    run: async (c) => {
+      await c.page("__t.click(__t.byText('.side-nav', 'Projects'))")
+      await c.waitFor('projects page', "!!__t.byText('.page-head .btn', 'New project')")
+      await c.page("__t.click(__t.byText('.page-head .btn', 'New project'))")
+      await c.page("__t.setValue(__t.q('.project-form input'), 'E2E project')")
+      await c.page("__t.click(__t.byText('.project-form .btn', 'Create project'))")
+      await c.waitFor('project page', "__t.text('.project-title-row h1') === 'E2E project'")
+      await c.page("__t.setValue(__t.q('.project-composer .composer-input'), 'hello project'); __t.key(__t.q('.project-composer .composer-input'), 'Enter')")
+      await c.waitFor('chat in the project', "__t.text('.titlebar .crumb').includes('E2E project') && __t.qa('.turn').some((t) => t.innerText.includes('Echo: hello project'))", 15000)
+    }
+  },
+  {
+    name: 'pin a chat and collapse a group',
+    run: async (c) => {
+      await c.page("__t.click(__t.q('.session-item .more .menu-trigger'))")
+      await c.menuItem('Pin')
+      await c.waitFor('pinned section', "!!__t.byText('.side-section .group-label', 'Pinned')")
+      await c.page("__t.click(__t.byText('.group-row .group-label', 'Today'))")
+      await c.waitFor('Today collapsed', "__t.qa('.side-section.closed').some((s) => s.textContent.includes('Today'))")
+      await c.page("__t.click(__t.byText('.group-row .group-label', 'Today'))")
+      await c.waitFor('Today open', "!__t.qa('.side-section.closed').some((s) => s.textContent.includes('Today'))")
+    }
+  }
+]

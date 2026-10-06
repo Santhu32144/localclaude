@@ -3,11 +3,13 @@ import type { AppSettings, AuthStatus, LockStatus, McpServerEntry, MemoryItem } 
 import { api } from '../api'
 import { REPLY_FONTS, UI_FONTS } from '../fonts'
 import { MemoryList } from './Memory'
+import { ShortcutField, StylesEditor, UsagePanel } from './SettingsExtras'
 
 const TABS: [string, string][] = [
   ['general', 'General'],
   ['tools', 'Tools & computer'],
   ['memory', 'Memory & data'],
+  ['usage', 'Usage'],
   ['account', 'Account & privacy'],
   ['about', 'About']
 ]
@@ -228,6 +230,29 @@ export function SettingsDialog(props: {
                   onBlur={() => prompt !== s.appendSystemPrompt && void props.onChange({ appendSystemPrompt: prompt })}
                 />
               </div>
+              <StylesEditor settings={s} onChange={props.onChange} />
+              <label className="toggle">
+                <input type="checkbox" checked={s.notifications} onChange={(e) => void props.onChange({ notifications: e.target.checked })} />
+                <span>
+                  <b>Notify me when Claude finishes or needs me</b>
+                  <span className="muted small">A desktop notification while you’re in another window. Click it to jump to the chat.</span>
+                </span>
+              </label>
+              <label className="toggle">
+                <input type="checkbox" checked={s.autoTitles} onChange={(e) => void props.onChange({ autoTitles: e.target.checked })} />
+                <span>
+                  <b>Name new chats automatically</b>
+                  <span className="muted small">After the first reply, a short title is written for the chat (one small Haiku request on your plan).</span>
+                </span>
+              </label>
+              <ShortcutField settings={s} onChange={props.onChange} />
+            </>
+          )}
+
+          {props.tab === 'usage' && (
+            <>
+              <h2>Usage</h2>
+              <UsagePanel />
             </>
           )}
 

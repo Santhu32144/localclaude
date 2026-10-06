@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dist:linux": "electron-vite build && electron-builder --linux",
     "dist:win": "electron-vite build && electron-builder --win",
-    "test": "esbuild test/agent.test.ts --bundle --platform=node --format=esm --outfile=test/out/agent.test.mjs --alias:electron=./test/electron-stub.js --external:@anthropic-ai/claude-agent-sdk --log-level=warning && node test/out/agent.test.mjs"
+    "test": "esbuild test/agent.test.ts --bundle --platform=node --format=esm --outfile=test/out/agent.test.mjs --alias:electron=./test/electron-stub.js --external:@anthropic-ai/claude-agent-sdk --log-level=warning && node test/out/agent.test.mjs",
+    "test:e2e": "electron-vite build && node test/e2e/launch.mjs"
   },
   "author": "Parthasarathy M",
   "license": "UNLICENSED",

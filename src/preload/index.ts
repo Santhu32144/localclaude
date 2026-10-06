@@ -14,6 +14,7 @@ import type {
   ExportResult,
   ImportResult,
   MemoryItem,
+  PlanUsage,
   Project,
   ProjectArtifactRef,
   ProjectContextUsage,
@@ -101,6 +102,14 @@ const api = {
   editMemory: (projectId: string | null, id: string, text: string) => inv<MemoryState>('memory:edit', projectId, id, text),
   removeMemory: (projectId: string | null, id: string) => inv<MemoryState>('memory:remove', projectId, id),
   clearMemory: (projectId: string | null) => inv<MemoryState>('memory:clear', projectId),
+
+  usage: () => inv<PlanUsage>('usage:get'),
+  setStyle: (id: string, style: string) => inv<void>('chat:setStyle', id, style),
+  shortcutStatus: () => inv<{ accelerator: string; ok: boolean }>('shortcut:status'),
+  /** a notification was clicked: show that chat */
+  onOpenSession: (cb: (sessionId: string) => void) => on<string>('app:open-session', cb),
+  /** the global shortcut was pressed */
+  onNewChat: (cb: () => void) => on<null>('app:new-chat', () => cb()),
 
   exportData: (req: ExportRequest) => inv<ExportResult>('export:run', req),
   revealFile: (path: string) => inv<void>('export:reveal', path),

@@ -79,6 +79,7 @@ function run(args: string[], timeoutMs = 20000): Promise<{ code: number | null; 
 }
 
 export async function authStatus(): Promise<AuthStatus> {
+  if (process.env.LOCALCLAUDE_FAKE_AGENT) return { loggedIn: true, authMethod: 'claude.ai', email: 'e2e@example.com', subscriptionType: 'max', usingApiKeyEnv: false }
   const r = await run(['auth', 'status', '--json'])
   const base: AuthStatus = { loggedIn: false, usingApiKeyEnv: hadApiKeyInEnv() }
   try {
