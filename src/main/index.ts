@@ -615,7 +615,6 @@ function warmVault(): void {
 
 /** Chats and memory follow into the vault as notes (when those options are on). */
 function syncToVault(e: AgentEvent): void {
-  if (e.type === 'error') log('warn', `chat ${e.sessionId.slice(0, 8)}: ${e.text.slice(0, 500)}`)
   if (e.type === 'turn-done') vaultSync.chatChanged(e.sessionId)
   else if (e.type === 'meta') vaultSync.chatChanged(e.meta.id)
   else if (e.type === 'global-memory' || e.type === 'project') vaultSync.memoryChanged()
@@ -692,6 +691,7 @@ app.whenReady().then(() => {
       send('agent:event', e)
       notify(e)
       syncToVault(e)
+      if (e.type === 'error') log('warn', `chat ${e.sessionId.slice(0, 8)}: ${e.text.slice(0, 500)}`)
     },
     {
       knowledge,

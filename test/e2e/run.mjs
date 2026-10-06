@@ -112,7 +112,12 @@ app.whenReady().then(async () => {
       if (!dir) return
       mkdirSync(dir, { recursive: true })
       await sleep(300)
-      writeFileSync(join(dir, name + '.png'), (await wc.capturePage()).toPNG())
+      try {
+        writeFileSync(join(dir, name + '.png'), (await wc.capturePage()).toPNG())
+      } catch (e) {
+        // some virtual displays (Linux CI) can't capture; screenshots are for people, not part of the test
+        console.warn(`  (no screenshot "${name}": ${e instanceof Error ? e.message : e})`)
+      }
     },
     /** Send a message in the open chat and wait for Claude's reply to contain `expect`. */
     send: async (text, expect) => {
