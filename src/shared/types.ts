@@ -55,6 +55,20 @@ export interface AppSettings {
   backupEvery: 'daily' | 'weekly'
   /** how many automatic backups to keep in the folder */
   backupKeep: number
+  /** use the Obsidian vault at all: off stops searching, writing and syncing, but keeps the link and choices */
+  obsidianEnabled: boolean
+  /** your Obsidian vault (its folder), '' when none is linked */
+  obsidianVault: string
+  /** Claude can search and read the vault's notes in every chat */
+  obsidianSearch: boolean
+  /** Claude can save notes into the vault (in obsidianFolder/Notes) */
+  obsidianWrite: boolean
+  /** keep each chat as a note in the vault (obsidianFolder/Chats) */
+  obsidianSyncChats: boolean
+  /** keep what Claude remembers as a note (obsidianFolder/Memory.md) */
+  obsidianSyncMemory: boolean
+  /** LocalClaude's folder inside the vault */
+  obsidianFolder: string
   /** Extra instructions appended to Claude Code's system prompt */
   appendSystemPrompt: string
 }
@@ -308,6 +322,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   backupDir: '',
   backupEvery: 'daily',
   backupKeep: 7,
+  obsidianEnabled: true,
+  obsidianVault: '',
+  obsidianSearch: true,
+  obsidianWrite: false,
+  obsidianSyncChats: false,
+  obsidianSyncMemory: false,
+  obsidianFolder: 'LocalClaude',
   appendSystemPrompt: ''
 }
 
@@ -349,6 +370,8 @@ export interface Project {
   /** working folder for new chats in this project (falls back to the default) */
   cwd?: string
   files: ProjectFile[]
+  /** folders linked as knowledge: read live from disk, and Claude searches them */
+  folders?: string[]
   /** facts Claude (or you) saved for this project */
   memory?: MemoryItem[]
   pinned?: boolean
@@ -386,8 +409,8 @@ export interface ProjectContextUsage {
   knowledge: number
   memory: number
   total: number
-  /** knowledge is longer than the limit and gets cut off */
-  truncated: boolean
+  /** the knowledge files are too large to send in full, so Claude searches them instead */
+  searched: boolean
 }
 
 // ---------------------------------------------------------------- export / import
@@ -436,6 +459,27 @@ export interface ImportResult {
   skipped: number
   /** chats whose Claude Code transcript isn't on this machine: they continue with the old messages as context */
   withoutTranscript: number
+}
+
+// ---------------------------------------------------------------- Obsidian
+export interface ObsidianVault {
+  path: string
+  name: string
+  /** open in Obsidian right now */
+  open?: boolean
+}
+
+export interface VaultStatus {
+  linked: boolean
+  /** linked, but switched off in settings */
+  off?: boolean
+  name?: string
+  /** the folder is gone (moved, or a drive that isn't connected) */
+  missing?: boolean
+  files?: number
+  passages?: number
+  /** more files than are indexed */
+  more?: boolean
 }
 
 // ---------------------------------------------------------------- backups

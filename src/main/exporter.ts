@@ -330,9 +330,11 @@ function memoryMarkdown(items: MemoryItem[], heading: string): string {
 export function projectContext(project: Project, files: Record<string, string>): ProjectContextUsage {
   const knowledgeChars = project.files.reduce((n, f) => n + (files[f.id]?.length ?? 0), 0)
   const instructions = estimateTokens(project.instructions.length + project.description.length)
-  const knowledge = estimateTokens(Math.min(knowledgeChars, PROJECT_KNOWLEDGE_LIMIT_CHARS))
+  // too much to send in full: only the list of files goes along, and Claude searches them
+  const searched = knowledgeChars > PROJECT_KNOWLEDGE_LIMIT_CHARS
+  const knowledge = estimateTokens(searched ? project.files.reduce((n, f) => n + f.name.length + 40, 0) : knowledgeChars)
   const memory = estimateTokens((project.memory ?? []).reduce((n, m) => n + m.text.length + 12, 0))
-  return { instructions, knowledge, memory, total: instructions + knowledge + memory, truncated: knowledgeChars > PROJECT_KNOWLEDGE_LIMIT_CHARS }
+  return { instructions, knowledge, memory, total: instructions + knowledge + memory, searched }
 }
 
 function addProject(bundle: Bundle, store: Store, project: Project, base: string, opts: ExportOptions): void {
@@ -357,7 +359,7 @@ function addProject(bundle: Bundle, store: Store, project: Project, base: string
     `Sent with every chat in this project: about **${ctx.total.toLocaleString()} tokens** (${Math.round((ctx.total / 200_000) * 100)}% of a 200K context window).`,
     '',
     `- Instructions: ~${ctx.instructions.toLocaleString()} tokens`,
-    `- Knowledge: ${plural(project.files.length, 'file')}, ~${ctx.knowledge.toLocaleString()} tokens${ctx.truncated ? ' (cut to the knowledge limit)' : ''}`,
+    `- Knowledge: ${plural(project.files.length, 'file')}, ~${ctx.knowledge.toLocaleString()} tokens${ctx.searched ? ' (too large to send in full: Claude searches it)' : ''}`,
     `- Memory: ${plural((project.memory ?? []).length, 'item')}, ~${ctx.memory.toLocaleString()} tokens`,
     ''
   )

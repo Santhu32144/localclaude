@@ -1,11 +1,10 @@
 // Projects: groups of chats with shared instructions, knowledge files and a working folder.
 import { randomUUID } from 'node:crypto'
-import { readFileSync, statSync } from 'node:fs'
-import { basename } from 'node:path'
+import { statSync } from 'node:fs'
+import { basename, resolve } from 'node:path'
 import type { Project } from '../shared/types'
+import { ExtractError, extractFile } from './extract'
 import type { SecureStore } from './store'
-
-const MAX_FILE_BYTES = 5 * 1024 * 1024
 
 export function createProject(store: SecureStore, input: { name: string; description?: string }): Project {
   const now = Date.now()
@@ -32,15 +31,11 @@ export function updateProject(store: SecureStore, id: string, patch: Partial<Pic
   return next
 }
 
-/** Text that looks binary (NUL bytes) can't be used as knowledge. */
-function readText(path: string): string | null {
-  const buf = readFileSync(path)
-  if (buf.subarray(0, 8192).includes(0)) return null
-  return buf.toString('utf8')
-}
-
-/** Copy text files into the project's encrypted knowledge. Returns the project and any files that were skipped. */
-export function addProjectFiles(store: SecureStore, id: string, paths: string[]): { project: Project; skipped: string[] } {
+/**
+ * Add files to the project's encrypted knowledge: text and code, Markdown, PDF, Word, PowerPoint
+ * and Excel (their text is kept). Returns the project and any files that were skipped, with why.
+ */
+export async function addProjectFiles(store: SecureStore, id: string, paths: string[]): Promise<{ project: Project; skipped: string[] }> {
   const p = store.getProject(id)
   if (!p) throw new Error('Unknown project')
   const contents = store.loadProjectFiles(id)
@@ -50,13 +45,12 @@ export function addProjectFiles(store: SecureStore, id: string, paths: string[])
     const name = basename(path)
     try {
       const size = statSync(path).size
-      if (size > MAX_FILE_BYTES) {
-        skipped.push(`${name} (over 5 MB)`)
-        continue
-      }
-      const text = readText(path)
-      if (text === null) {
-        skipped.push(`${name} (not a text file)`)
+      let text: string
+      try {
+        text = await extractFile(path)
+      } catch (e) {
+        if (!(e instanceof ExtractError)) throw e
+        skipped.push(`${name} (${e.message})`)
         continue
       }
       // Re-adding a file with the same name replaces it.
@@ -73,6 +67,25 @@ export function addProjectFiles(store: SecureStore, id: string, paths: string[])
   const next = { ...p, files, updatedAt: Date.now() }
   store.upsertProject(next)
   return { project: next, skipped }
+}
+
+/** Link a folder as knowledge: its notes and documents are read live, and Claude searches them. */
+export function addProjectFolder(store: SecureStore, id: string, folder: string): Project {
+  const p = store.getProject(id)
+  if (!p) throw new Error('Unknown project')
+  const path = resolve(folder)
+  if ((p.folders ?? []).includes(path)) return p
+  const next = { ...p, folders: [...(p.folders ?? []), path], updatedAt: Date.now() }
+  store.upsertProject(next)
+  return next
+}
+
+export function removeProjectFolder(store: SecureStore, id: string, folder: string): Project {
+  const p = store.getProject(id)
+  if (!p) throw new Error('Unknown project')
+  const next = { ...p, folders: (p.folders ?? []).filter((f) => f !== folder), updatedAt: Date.now() }
+  store.upsertProject(next)
+  return next
 }
 
 export function removeProjectFile(store: SecureStore, id: string, fileId: string): Project {

@@ -17,6 +17,7 @@ const ago = (ts: number): string => {
   return d < 30 ? `${d} day${d === 1 ? '' : 's'} ago` : new Date(ts).toLocaleDateString()
 }
 const kb = (n: number): string => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`)
+const folderName = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? p
 const tokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
 /** Context window the project's share is measured against. */
 const CONTEXT_WINDOW = 200_000
@@ -191,7 +192,8 @@ function ContextCard({ usage }: { usage: ProjectContextUsage | null }) {
         </span>
       </div>
       <div className="muted small">
-        About {usage.total.toLocaleString()} tokens are sent with every message in this project{usage.truncated ? '. Knowledge is over the limit and gets cut off' : ''}.
+        About {usage.total.toLocaleString()} tokens are sent with every message in this project
+        {usage.searched ? '. The knowledge files are too large to send in full, so Claude searches them when needed' : ''}.
       </div>
     </div>
   )
@@ -219,6 +221,7 @@ export function ProjectView(props: {
   const [instr, setInstr] = useState(p.instructions)
   const [editingInstr, setEditingInstr] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
   const [renaming, setRenaming] = useState<{ name: string; description: string } | null>(null)
   const [artifacts, setArtifacts] = useState<ProjectArtifactRef[]>([])
   const [usage, setUsage] = useState<ProjectContextUsage | null>(null)
@@ -420,22 +423,43 @@ export function ProjectView(props: {
             <div className="side-card">
               <div className="side-card-head">
                 <span>Knowledge</span>
-                <button
-                  className="link-btn"
-                  onClick={async () => {
-                    const paths = await api.pickFiles()
-                    if (!paths.length) return
-                    const r = await api.addProjectFiles(p.id, paths)
-                    props.onChanged(r.project)
-                    setNotice(r.skipped.length ? `Skipped: ${r.skipped.join(', ')}` : null)
-                  }}
-                >
-                  + Add files
-                </button>
+                <span className="row gap">
+                  <button
+                    className="link-btn"
+                    disabled={adding}
+                    onClick={async () => {
+                      const paths = await api.pickFiles()
+                      if (!paths.length) return
+                      setAdding(true)
+                      try {
+                        const r = await api.addProjectFiles(p.id, paths)
+                        props.onChanged(r.project)
+                        setNotice(r.skipped.length ? `Skipped: ${r.skipped.join(', ')}` : null)
+                      } finally {
+                        setAdding(false)
+                      }
+                    }}
+                  >
+                    {adding ? 'Reading…' : '+ Add files'}
+                  </button>
+                  <button
+                    className="link-btn"
+                    title="Link a folder, like part of your Obsidian vault: it stays in sync and Claude searches it"
+                    onClick={async () => {
+                      const next = await api.addProjectFolder(p.id)
+                      if (next) props.onChanged(next)
+                    }}
+                  >
+                    + Link folder
+                  </button>
+                </span>
               </div>
-              {p.files.length === 0 ? (
-                <div className="side-card-body muted">Add text files (docs, notes, code, CSV, JSON…). Claude reads them in every chat in this project.</div>
-              ) : (
+              {p.files.length === 0 && !p.folders?.length ? (
+                <div className="side-card-body muted">
+                  Add PDFs, Word, PowerPoint and Excel files, notes, code or data. Claude reads them in every chat in this project, and searches them when
+                  they’re large. Or link a folder to keep it in sync.
+                </div>
+              ) : p.files.length === 0 ? null : (
                 <ul className="knowledge-list">
                   {p.files.map((f) => (
                     <li key={f.id}>
@@ -445,6 +469,22 @@ export function ProjectView(props: {
                       </span>
                       <span className="muted small">{kb(f.size)}</span>
                       <button className="icon-btn" title="Remove" onClick={async () => props.onChanged(await api.removeProjectFile(p.id, f.id))}>
+                        <Icon name="x" size={13} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {(p.folders ?? []).length > 0 && (
+                <ul className="knowledge-list linked-folders">
+                  {p.folders!.map((f) => (
+                    <li key={f}>
+                      <Icon name="folder" size={15} />
+                      <span className="knowledge-name" title={f}>
+                        {folderName(f)}
+                      </span>
+                      <span className="muted small">linked</span>
+                      <button className="icon-btn" title="Unlink this folder" onClick={async () => props.onChanged(await api.removeProjectFolder(p.id, f))}>
                         <Icon name="x" size={13} />
                       </button>
                     </li>

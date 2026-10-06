@@ -17,6 +17,7 @@ import type {
   ExportResult,
   ImportResult,
   MemoryItem,
+  ObsidianVault,
   PlanUsage,
   Project,
   ProjectArtifactRef,
@@ -24,7 +25,8 @@ import type {
   RewindPreview,
   RewindRequest,
   SendPayload,
-  SessionMeta
+  SessionMeta,
+  VaultStatus
 } from '../shared/types'
 
 /** Memory after a change, plus the updated project when it was project memory. */
@@ -95,6 +97,13 @@ const api = {
     inv<Project>('projects:update', id, patch),
   deleteProject: (id: string) => inv<void>('projects:delete', id),
   addProjectFiles: (id: string, paths: string[]) => inv<{ project: Project; skipped: string[] }>('projects:addFiles', id, paths),
+  addProjectFolder: (id: string) => inv<Project | null>('projects:addFolder', id),
+  removeProjectFolder: (id: string, folder: string) => inv<Project>('projects:removeFolder', id, folder),
+  obsidianVaults: () => inv<ObsidianVault[]>('obsidian:vaults'),
+  obsidianStatus: () => inv<VaultStatus>('obsidian:status'),
+  openInObsidian: (path?: string) => inv<void>('obsidian:open', path),
+  openChatInObsidian: (sessionId: string) => inv<boolean>('obsidian:openChat', sessionId),
+  saveAllToVault: () => inv<number>('obsidian:saveAll'),
   removeProjectFile: (id: string, fileId: string) => inv<Project>('projects:removeFile', id, fileId),
   projectArtifacts: (id: string) => inv<ProjectArtifactRef[]>('projects:artifacts', id),
   projectContext: (id: string) => inv<ProjectContextUsage | null>('projects:context', id),

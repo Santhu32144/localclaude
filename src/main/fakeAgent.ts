@@ -148,6 +148,16 @@ export function fakeQuery({ prompt, options = {} }: { prompt: string | AsyncIter
         return r
       })
       reply = `Knowledge: ${found.slice(0, 200)}`
+    } else if (t.startsWith('save a note titled ')) {
+      const title = text.slice('save a note titled '.length).trim()
+      const input = { title, content: `Plans for ${title}. See [[Ideas]].` }
+      let saved = ''
+      await callTool('mcp__knowledge__save_note', input, async () => {
+        const r = await tool('knowledge', 'save_note', input)
+        saved = r.text
+        return r
+      })
+      reply = `Note: ${saved}`
     } else if (t.includes('take a screenshot')) {
       const id = 'toolu_' + randomUUID().slice(0, 8)
       out.push({ type: 'assistant', uuid: randomUUID(), parent_tool_use_id: null, message: { id: 'msg_' + randomUUID().slice(0, 8), content: [{ type: 'tool_use', id, name: 'mcp__computer-use__computer', input: { action: 'screenshot' } }] } })

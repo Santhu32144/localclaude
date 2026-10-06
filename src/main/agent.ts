@@ -2,6 +2,8 @@
 // stream into UI events. One long-lived streaming query per open chat.
 import type { Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { basename } from 'node:path'
 import { applyEvent, toolResultToText } from '../shared/reducer'
 import type {
   AgentEvent,
@@ -28,6 +30,8 @@ import { ARTIFACT_TOOLS, createArtifactServer } from './artifacts'
 import { CHAT_TOOLS, ChatIndex, createChatsServer } from './chatSearch'
 import { createComputerServer } from './computer'
 import { referencedImages, resultImages, storeImage } from './images'
+import { KNOWLEDGE_TOOLS, NOTE_TOOL, createKnowledgeServer, type KnowledgeIndex, type KnowledgeService } from './knowledge'
+import { activeVault } from './obsidian'
 import { query } from './sdk'
 import { importedContext } from './exporter'
 import { PROJECT_KNOWLEDGE_LIMIT_CHARS } from './limits'
@@ -82,6 +86,8 @@ export interface SessionDeps {
   titleFor?: (firstUser: string, firstReply: string) => Promise<string | null>
   /** full-text index of all chats (for Claude's chat search tool) */
   chatIndex?: ChatIndex
+  /** searchable knowledge: big project files, linked folders, the Obsidian vault */
+  knowledge?: KnowledgeService
 }
 
 class AgentSession {
@@ -139,6 +145,41 @@ class AgentSession {
   }
 
   // ---------------------------------------------------------------- lifecycle
+  /**
+   * The knowledge tools, when there's something to search: project files too big to send in full,
+   * folders linked to the project, or the Obsidian vault (and its notes folder, if Claude may write).
+   */
+  private knowledgeSetup(project: Project | undefined): { server: ReturnType<typeof createKnowledgeServer>; tools: string[]; vault?: VaultPrompt } | null {
+    const k = this.deps.knowledge
+    if (!k) return null
+    const s = this.settings()
+    // switched off in settings: the vault isn't searched or written to
+    const vault = activeVault(s) ?? ''
+    const searchVault = !!vault && s.obsidianSearch
+    const notes = vault && s.obsidianWrite ? { root: vault, folder: s.obsidianFolder || 'LocalClaude' } : undefined
+    const folders = (project?.folders ?? []).filter((f) => existsSync(f))
+    const bigProject = !!project && projectKnowledgeChars(project, this.store) > PROJECT_KNOWLEDGE_LIMIT
+    if (!bigProject && !folders.length && !searchVault && !notes) return null
+    const what = [project?.files.length ? 'the project files' : '', folders.length ? 'the linked folders' : '', searchVault ? 'the Obsidian vault' : ''].filter(Boolean)
+    const server = createKnowledgeServer({
+      describe: what.length ? `the user's knowledge (${what.join(', ')})` : "the user's notes",
+      indexes: async () => {
+        const out: KnowledgeIndex[] = []
+        if (project?.files.length) out.push(k.project(project.id, project.updatedAt, project.files, () => this.store.loadProjectFiles(project.id)))
+        for (const f of folders) out.push((await k.folder(f, `folder ${basename(f)}`)).index)
+        if (searchVault) out.push((await k.folder(vault, `Obsidian vault ${basename(vault)}`)).index)
+        return out
+      },
+      notes,
+      onNoteSaved: () => k.invalidate(vault)
+    })
+    return {
+      server,
+      tools: [...KNOWLEDGE_TOOLS, ...(notes ? [NOTE_TOOL] : [])],
+      vault: vault && (searchVault || notes) ? { name: basename(vault), search: searchVault, notesFolder: notes ? `${notes.folder}/Notes` : undefined } : undefined
+    }
+  }
+
   private buildOptions(): Options {
     const s = this.settings()
     const sources: ('user' | 'project' | 'local')[] = []
@@ -181,6 +222,11 @@ class AgentSession {
       mcpServers['chats'] = createChatsServer({ index: this.deps.chatIndex, store: this.store, sessionId: this.meta.id, projectId: project?.id })
     // These only read or write LocalClaude's own storage, so they never need a prompt.
     const autoAllowed = [...(s.artifacts ? ARTIFACT_TOOLS : []), ...(s.memory ? MEMORY_TOOLS : []), ...(s.chatSearch && this.deps.chatIndex ? CHAT_TOOLS : [])]
+    const kb = this.knowledgeSetup(project)
+    if (kb) {
+      mcpServers['knowledge'] = kb.server
+      autoAllowed.push(...kb.tools)
+    }
 
     this.abort = new AbortController()
     this.startedWithBypass = this.meta.permissionMode === 'bypassPermissions'
@@ -205,7 +251,8 @@ class AgentSession {
           project,
           this.store,
           s.memory ? { global: this.store.getGlobalMemory() } : null,
-          resolveStyle(this.meta.style, s.defaultStyle, s.customStyles)
+          resolveStyle(this.meta.style, s.defaultStyle, s.customStyles),
+          kb?.vault
         )
       },
       allowedTools: autoAllowed.length ? autoAllowed : undefined,
@@ -850,12 +897,28 @@ class AgentSession {
 export const PROJECT_KNOWLEDGE_LIMIT = PROJECT_KNOWLEDGE_LIMIT_CHARS
 
 /** Personal instructions, then the project's instructions and knowledge files, then memory (when on). */
+/** How many characters of knowledge a project's files hold. */
+function projectKnowledgeChars(project: Project, store: Pick<SecureStore, 'loadProjectFiles'>): number {
+  if (!project.files.length) return 0
+  const contents = store.loadProjectFiles(project.id)
+  return project.files.reduce((n, f) => n + (contents[f.id]?.length ?? 0), 0)
+}
+
+/** The linked Obsidian vault, as Claude's instructions describe it. */
+export interface VaultPrompt {
+  name: string
+  search: boolean
+  /** where save_note writes, when Claude may write notes */
+  notesFolder?: string
+}
+
 export function systemAppend(
   personal: string,
   project: Project | undefined,
   store: Pick<SecureStore, 'loadProjectFiles'>,
   memory: { global: MemoryItem[] } | null = null,
-  style?: ResponseStyle
+  style?: ResponseStyle,
+  vault?: VaultPrompt
 ): string | undefined {
   const parts: string[] = []
   if (personal?.trim()) parts.push(personal.trim())
@@ -865,21 +928,34 @@ export function systemAppend(
     if (project.instructions.trim()) lines.push(`<instructions>\n${project.instructions.trim()}\n</instructions>`)
     if (project.files.length) {
       const contents = store.loadProjectFiles(project.id)
-      let budget = PROJECT_KNOWLEDGE_LIMIT
-      lines.push('<knowledge>')
-      for (const f of project.files) {
-        const text = contents[f.id] ?? ''
-        const take = text.slice(0, Math.max(0, budget))
-        budget -= take.length
-        const cut = take.length < text.length ? '\n[truncated: project knowledge limit reached]' : ''
-        lines.push(`<file name="${f.name}">\n${take}${cut}\n</file>`)
+      const total = project.files.reduce((n, f) => n + (contents[f.id]?.length ?? 0), 0)
+      if (total <= PROJECT_KNOWLEDGE_LIMIT) {
+        lines.push('<knowledge>')
+        for (const f of project.files) lines.push(`<file name="${f.name}">\n${contents[f.id] ?? ''}\n</file>`)
+        lines.push('</knowledge>')
+      } else {
+        // too much to carry in every message: list the files and let Claude search them
+        lines.push(`<knowledge_files count="${project.files.length}">`)
+        for (const f of project.files.slice(0, 200)) lines.push(`- ${f.name} (${(contents[f.id]?.length ?? 0).toLocaleString()} characters)`)
+        if (project.files.length > 200) lines.push(`- … and ${project.files.length - 200} more`)
+        lines.push('</knowledge_files>')
+        lines.push('These knowledge files are too large to include here. Use search_knowledge to find what you need in them and read_knowledge to read a file.')
       }
-      lines.push('</knowledge>')
+    }
+    if (project.folders?.length) {
+      lines.push(`<linked_folders>\n${project.folders.map((f) => `- ${f}`).join('\n')}\n</linked_folders>`)
+      lines.push('The notes and documents in these folders are also knowledge for this project: search them with search_knowledge.')
     }
     lines.push('</project>')
     parts.push("This chat is part of the user's project below. Follow its instructions and use its knowledge files when relevant.\n" + lines.join('\n'))
   }
   if (memory) parts.push(memoryPrompt(memory.global, project ? { name: project.name, items: project.memory ?? [] } : undefined))
+  if (vault) {
+    const v = [`The user's Obsidian vault "${vault.name}" is linked to LocalClaude.`]
+    if (vault.search) v.push('When their notes might help, search them with search_knowledge and read a note with read_knowledge; say which note you used.')
+    if (vault.notesFolder) v.push(`When they ask you to write something down or keep it for later, save it as a note with save_note (it goes in ${vault.notesFolder}). Use [[wikilinks]] to connect notes.`)
+    parts.push(`<obsidian>\n${v.join(' ')}\n</obsidian>`)
+  }
   if (style) parts.push(`<response_style name="${style.name}">\nThe user chose this style for your replies:\n${style.prompt.trim()}\n</response_style>`)
   return parts.length ? parts.join('\n\n') : undefined
 }
@@ -919,7 +995,7 @@ export class SessionManager {
     deps: Partial<SessionDeps> = {}
   ) {
     this.index = new ChatIndex(store, (id) => this.sessions.get(id)?.history)
-    this.deps = { transcriptExists: deps.transcriptExists ?? transcriptExists, titleFor: deps.titleFor, chatIndex: this.index }
+    this.deps = { transcriptExists: deps.transcriptExists ?? transcriptExists, titleFor: deps.titleFor, chatIndex: this.index, knowledge: deps.knowledge }
   }
 
   searchChats(query: string): ChatSearchHit[] {

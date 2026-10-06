@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, ClipboardItem, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, Notification, protocol, screen, shell } from 'electron'
-import { readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { artifactExt, safeFileName } from '../shared/format'
@@ -19,7 +19,8 @@ import {
   type Project,
   type RewindRequest,
   type SendPayload,
-  type SessionMeta
+  type SessionMeta,
+  type VaultStatus
 } from '../shared/types'
 import { SessionManager } from './agent'
 import { renderArtifactPage } from './artifacts'
@@ -28,12 +29,14 @@ import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, s
 import { stopComputerHelper } from './computer'
 import { attachContextMenu } from './contextMenu'
 import { IMAGE_EXT, sniffImageType, thumbnail } from './images'
+import { KnowledgeService } from './knowledge'
+import { VaultSync, activeVault, detectVaults, obsidianUri } from './obsidian'
 import { notificationFor } from './notify'
 import { generateTitle } from './titles'
 import { fitToScreens, loadWindowState, trackWindowState } from './windowState'
 import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, projectContext, readBackup } from './exporter'
 import { addMemory, editMemory, getMemory, removeMemory, setMemory } from './memory'
-import { addProjectFiles, createProject, removeProjectFile, updateProject } from './projects'
+import { addProjectFiles, addProjectFolder, createProject, removeProjectFile, removeProjectFolder, updateProject } from './projects'
 import { SecureStore } from './store'
 import { createZip } from './zip'
 
@@ -177,10 +180,13 @@ function registerIpc(): void {
   // ---- settings
   handle('settings:get', () => store.getSettings())
   handle('settings:set', (patch: Partial<AppSettings>) => {
-    const before = store.getSettings().quickShortcut
+    const before = store.getSettings()
     const s = store.setSettings(patch)
     nativeTheme.themeSource = s.theme
-    if (s.quickShortcut !== before) applyQuickShortcut(s.quickShortcut)
+    if (s.quickShortcut !== before.quickShortcut) applyQuickShortcut(s.quickShortcut)
+    // a newly linked (or switched on) vault starts indexing in the background, so the first search is quick
+    if (activeVault(s) && (s.obsidianVault !== before.obsidianVault || !before.obsidianEnabled)) warmVault()
+    if (s.obsidianSyncMemory && (!before.obsidianSyncMemory || !before.obsidianEnabled)) vaultSync.memoryChanged()
     // Only settings that change how Claude Code runs need idle chats to restart.
     if (Object.keys(patch).some((k) => !UI_ONLY_SETTINGS.has(k as keyof AppSettings))) manager.restartIdle()
     return s
@@ -239,6 +245,7 @@ function registerIpc(): void {
   const memoryState = (projectId: string | null): { items: MemoryItem[]; project?: Project } => {
     // memory is part of the system prompt: idle chats restart to pick up your edits
     manager.restartIdle()
+    vaultSync.memoryChanged()
     const project = projectId ? store.getProject(projectId) : undefined
     return { items: getMemory(store, projectId ?? undefined), project }
   }
@@ -359,10 +366,45 @@ function registerIpc(): void {
     store.deleteProject(id)
     manager.restartIdle()
   })
-  handle('projects:addFiles', (id: string, paths: string[]) => {
-    const r = addProjectFiles(store, id, paths)
+  handle('projects:addFiles', async (id: string, paths: string[]) => {
+    const r = await addProjectFiles(store, id, paths)
     projectChanged(r.project)
     return r
+  })
+  handle('projects:addFolder', async (id: string) => {
+    const r = await dialog.showOpenDialog(win!, { title: 'Link a folder as knowledge', properties: ['openDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    return projectChanged(addProjectFolder(store, id, r.filePaths[0]))
+  })
+  handle('projects:removeFolder', (id: string, folder: string) => {
+    knowledge.invalidate(folder)
+    return projectChanged(removeProjectFolder(store, id, folder))
+  })
+
+  // ---- Obsidian
+  handle('obsidian:vaults', () => detectVaults())
+  handle('obsidian:status', async (): Promise<VaultStatus> => {
+    const { obsidianVault: v, obsidianEnabled } = store.getSettings()
+    if (!v) return { linked: false }
+    if (!obsidianEnabled) return { linked: true, name: basename(v), off: true }
+    if (!existsSync(v)) return { linked: true, name: basename(v), missing: true }
+    const { index, more } = await knowledge.folder(v, `Obsidian vault ${basename(v)}`)
+    return { linked: true, name: basename(v), files: index.docs.length, passages: index.size, more }
+  })
+  handle('obsidian:open', (path?: string) => {
+    const target = path || store.getSettings().obsidianVault
+    if (target) void shell.openExternal(obsidianUri(target))
+  })
+  handle('obsidian:openChat', (sessionId: string) => {
+    const file = vaultSync.notePath(sessionId) ?? vaultSync.writeChat(sessionId)
+    if (file) void shell.openExternal(obsidianUri(file))
+    return !!file
+  })
+  handle('obsidian:saveAll', () => {
+    let n = 0
+    for (const s of store.listSessions()) if (vaultSync.writeChat(s.id)) n++
+    if (store.getSettings().obsidianSyncMemory) vaultSync.writeMemory()
+    return n
   })
   handle('projects:removeFile', (id: string, fileId: string) => projectChanged(removeProjectFile(store, id, fileId)))
   handle('image:copy', async (sessionId: string, id: string) => {
@@ -522,6 +564,22 @@ function scheduleBackups(): void {
   setInterval(tick, 30 * 60_000)
 }
 
+// ---- knowledge: searchable project files, linked folders and the Obsidian vault
+const knowledge = new KnowledgeService()
+let vaultSync: VaultSync
+
+function warmVault(): void {
+  const v = activeVault(store.getSettings())
+  if (v) void knowledge.folder(v, `Obsidian vault ${basename(v)}`).catch(() => {})
+}
+
+/** Chats and memory follow into the vault as notes (when those options are on). */
+function syncToVault(e: AgentEvent): void {
+  if (e.type === 'turn-done') vaultSync.chatChanged(e.sessionId)
+  else if (e.type === 'meta') vaultSync.chatChanged(e.meta.id)
+  else if (e.type === 'global-memory' || e.type === 'project') vaultSync.memoryChanged()
+}
+
 /** Settings that only change the UI; changing them doesn't restart idle chats. */
 const UI_ONLY_SETTINGS = new Set<keyof AppSettings>([
   'theme',
@@ -536,7 +594,9 @@ const UI_ONLY_SETTINGS = new Set<keyof AppSettings>([
   'autoBackup',
   'backupDir',
   'backupEvery',
-  'backupKeep'
+  'backupKeep',
+  'obsidianSyncChats',
+  'obsidianSyncMemory'
 ])
 
 function bringToFront(): void {
@@ -588,13 +648,31 @@ app.whenReady().then(() => {
     (e: AgentEvent) => {
       send('agent:event', e)
       notify(e)
+      syncToVault(e)
     },
     {
+      knowledge,
       titleFor: (user, reply) => (store.getSettings().autoTitles ? generateTitle(user, reply) : Promise.resolve(null)),
       // the test stand-in for Claude Code doesn't write transcripts
       transcriptExists: process.env.LOCALCLAUDE_FAKE_AGENT ? () => true : undefined
     }
   )
+  // notes are written from what's in memory, which is newer than what's saved
+  vaultSync = new VaultSync(
+    {
+      getSession: (id) => store.getSession(id),
+      loadHistory: (id) => manager.history(id),
+      loadArtifacts: (id) => store.loadArtifacts(id),
+      loadImage: (sid, id) => store.loadImage(sid, id),
+      getProject: (id) => store.getProject(id),
+      listProjects: () => store.listProjects(),
+      getGlobalMemory: () => store.getGlobalMemory(),
+      getNotePath: (id) => store.getNotePath(id),
+      setNotePath: (id, rel) => store.setNotePath(id, rel)
+    },
+    () => store.getSettings()
+  )
+  if (store.lock.ok) warmVault()
   registerIpc()
   serveArtifacts()
   serveImages()

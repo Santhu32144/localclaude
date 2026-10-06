@@ -1,7 +1,7 @@
 // End-to-end tests: the real app (main process, preload and UI from out/) with a scripted Claude
 // (LOCALCLAUDE_FAKE_AGENT), a throwaway profile, and file dialogs answered by the steps.
 // Run with `npm run test:e2e`. Pass a step name to run up to and including it.
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow, dialog, shell } from 'electron'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -12,6 +12,8 @@ const work = mkdtempSync(join(tmpdir(), 'lc-e2e-'))
 process.env.LOCALCLAUDE_USER_DATA = join(work, 'profile')
 process.env.LOCALCLAUDE_FAKE_AGENT = '1'
 process.env.LOCALCLAUDE_TEST_MODE = '1'
+// Obsidian's list of vaults: the steps write their own instead of reading yours
+process.env.LOCALCLAUDE_OBSIDIAN_CONFIG = join(work, 'obsidian.json')
 
 // File dialogs take their answers from this queue, in order.
 const answers = []
@@ -22,6 +24,11 @@ dialog.showSaveDialog = async () => {
 dialog.showOpenDialog = async () => {
   const a = answers.shift()
   return a ? { canceled: false, filePaths: [].concat(a) } : { canceled: true, filePaths: [] }
+}
+// Links the app opens (obsidian://, websites) are recorded instead of opened.
+const opened = []
+shell.openExternal = async (url) => {
+  opened.push(url)
 }
 
 await import(pathToFileURL(resolve('out/main/index.js')).href)
@@ -69,11 +76,27 @@ app.whenReady().then(async () => {
     throw new Error(`timed out waiting for ${desc} (last: ${JSON.stringify(last)})\n--- screen text ---\n${dom}`)
   }
 
+  /** Wait for something outside the window (files on disk, links opened). */
+  const until = async (desc, fn, timeout = 10000) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < timeout) {
+      try {
+        if (fn()) return
+      } catch {
+        /* not yet */
+      }
+      await sleep(100)
+    }
+    throw new Error(`timed out waiting for ${desc}`)
+  }
+
   const ctx = {
     page,
+    until,
     waitFor,
     sleep,
     answers,
+    opened,
     work,
     file: (name) => join(work, name),
     exists: existsSync,

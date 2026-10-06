@@ -23,6 +23,8 @@ interface Vault {
   memory?: MemoryItem[]
   /** automatic backups: the password, and how the last one went */
   backup?: BackupState
+  /** chats kept as notes in the Obsidian vault: chat id -> note path inside the vault */
+  notes?: Record<string, string>
 }
 
 export interface BackupState {
@@ -236,6 +238,18 @@ export class SecureStore {
       n++
     }
     return n
+  }
+
+  // ---------- notes in the Obsidian vault ----------
+  getNotePath(sessionId: string): string | undefined {
+    return this.vault.notes?.[sessionId]
+  }
+  setNotePath(sessionId: string, rel: string | undefined): void {
+    const notes = { ...this.vault.notes }
+    if (rel) notes[sessionId] = rel
+    else delete notes[sessionId]
+    this.vault.notes = notes
+    this.saveVault()
   }
 
   // ---------- backups ----------

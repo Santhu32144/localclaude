@@ -294,6 +294,9 @@ export function ChatView(props: {
     { key: 'pin', label: meta.pinned ? 'Unpin' : 'Pin', onSelect: () => props.onPin(!meta.pinned) },
     { key: 'rewind', label: 'Rewind…', hint: 'Esc Esc', disabled: !canRewind || busy, onSelect: () => setRewind({ messageId: null }) },
     { key: 'export', label: 'Export…', hint: 'Markdown · Ctrl+Shift+E', onSelect: props.onExport },
+    ...(props.settings.obsidianEnabled && props.settings.obsidianVault
+      ? [{ key: 'obsidian', label: 'Open in Obsidian', hint: 'Saves it as a note', disabled: !top.length, onSelect: () => void api.openChatInObsidian(meta.id) }]
+      : []),
     'divider',
     { section: 'Working folder' },
     { key: 'open', label: baseName(meta.cwd), hint: started ? 'Open' : 'Change', onSelect: () => (started ? void api.openPath(meta.cwd) : void changeFolder()) },

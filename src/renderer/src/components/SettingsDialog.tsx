@@ -4,12 +4,14 @@ import { api } from '../api'
 import { REPLY_FONTS, UI_FONTS } from '../fonts'
 import { BackupsPanel } from './Backups'
 import { MemoryList } from './Memory'
+import { ObsidianPanel } from './ObsidianPanel'
 import { ShortcutField, StylesEditor, UsagePanel } from './SettingsExtras'
 
 const TABS: [string, string][] = [
   ['general', 'General'],
   ['tools', 'Tools & computer'],
   ['memory', 'Memory & data'],
+  ['obsidian', 'Obsidian'],
   ['backups', 'Backups'],
   ['usage', 'Usage'],
   ['account', 'Account & privacy'],
@@ -384,6 +386,7 @@ export function SettingsDialog(props: {
             </>
           )}
 
+          {props.tab === 'obsidian' && <ObsidianPanel settings={s} onChange={props.onChange} />}
           {props.tab === 'backups' && <BackupsPanel settings={s} onChange={props.onChange} onRestore={props.onImport} />}
 
           {props.tab === 'account' && (

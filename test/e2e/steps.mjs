@@ -1,4 +1,7 @@
 // End-to-end steps, run in order against one app instance (see run.mjs). Each step drives the real UI.
+import { join } from 'node:path'
+import { makeDocx, makePdf } from './files.mjs'
+
 const lastTurnId = "(__t.qa('.turn').at(-1)?.dataset.turn ?? '')"
 
 export const steps = [
@@ -330,6 +333,103 @@ export const steps = [
       if (files.length !== 1 || !/^LocalClaude backup .*\.lcbackup$/.test(files[0])) throw new Error('expected one backup in the folder, got ' + files.join(', '))
       await c.shot('backups')
       await c.closeModal()
+    }
+  },
+  {
+    name: 'project knowledge: PDF and Word files, and a linked folder Claude searches',
+    run: async (c) => {
+      const pdf = c.file('report.pdf')
+      c.write(pdf, makePdf(['Quarterly revenue grew 12 percent', 'Page two mentions the giraffe budget']))
+      const docx = c.file('launch.docx')
+      c.write(docx, makeDocx(['Launch on Friday', 'Invite the okapi team']))
+      const folder = c.file('field-notes')
+      c.mkdir(folder)
+      c.write(join(folder, 'trip.md'), '# Trip\n\nWe saw a zebra crossing the road.')
+      await c.page("__t.click(__t.byText('.side-nav', 'Projects'))")
+      await c.waitFor('project list', "!!__t.byText('.project-card', 'E2E project')")
+      await c.page("__t.click(__t.byText('.project-card', 'E2E project'))")
+      await c.waitFor('project page', "__t.text('.project-title-row h1') === 'E2E project'")
+      c.answers.push([pdf, docx])
+      await c.page("__t.click(__t.byText('.side-card-head .link-btn', 'Add files'))")
+      await c.waitFor('files added', "__t.text('.knowledge-list').includes('report.pdf') && __t.text('.knowledge-list').includes('launch.docx')", 20000)
+      c.answers.push(folder)
+      await c.page("__t.click(__t.byText('.side-card-head .link-btn', 'Link folder'))")
+      await c.waitFor('folder linked', "__t.text('.linked-folders').includes('field-notes')")
+      await c.shot('project-knowledge')
+      await c.page("__t.click(__t.q('.project-chat'))")
+      await c.waitFor('project chat', "__t.text('.titlebar .crumb').includes('E2E project')")
+      await c.send('search knowledge for giraffe', 'Knowledge: [1] report.pdf › [Page 2]')
+      await c.send('search knowledge for zebra', 'Knowledge: [1] trip.md › Trip (folder field-notes')
+      await c.send('search knowledge for okapi', 'Knowledge: [1] launch.docx (project files')
+    }
+  },
+  {
+    name: 'link an Obsidian vault and search its notes',
+    run: async (c) => {
+      const vault = c.file('Brain')
+      c.mkdir(join(vault, '.obsidian'))
+      c.mkdir(join(vault, 'Daily'))
+      c.write(join(vault, 'Daily', '2026-10-01.md'), 'Bought a red bicycle today.')
+      c.write(join(vault, 'Ideas.md'), 'A solar kettle, see [[Daily/2026-10-01]].')
+      c.write(join(vault, '.obsidian', 'workspace.md'), 'bicycle settings that are not notes')
+      c.write(c.file('obsidian.json'), JSON.stringify({ vaults: { abc: { path: vault, ts: Date.now(), open: true } } }))
+      await c.openSettings('Obsidian')
+      await c.waitFor('vault found', "__t.text('.vault-list').includes('Brain')")
+      await c.page("__t.click(__t.byText('.vault-option', 'Brain'))")
+      await c.waitFor('vault linked and read', "__t.text('.vault-status').includes('2 notes and documents searchable')", 20000)
+      for (const label of ['Claude can write notes', 'Keep chats as notes', 'Keep memory as a note'])
+        await c.page(`__t.click(__t.byText('.modal-body .toggle', ${JSON.stringify(label)}).querySelector('input'))`)
+      await c.waitFor('options on', "__t.qa('.modal-body .toggle input').filter((i) => i.checked).length === 5")
+      await c.shot('obsidian')
+      await c.closeModal()
+      await c.page("__t.click(__t.q('.side-new'))")
+      await c.send('search knowledge for bicycle', 'Knowledge: [1] Daily/2026-10-01.md (Obsidian vault Brain')
+    }
+  },
+  {
+    name: 'Claude writes a note; chats and memory become notes in the vault',
+    run: async (c) => {
+      const vault = c.file('Brain')
+      await c.send('save a note titled Kettle plans', 'Note: Saved LocalClaude/Notes/Kettle plans.md in the vault.')
+      if (!c.read(join(vault, 'LocalClaude', 'Notes', 'Kettle plans.md')).toString().includes('Plans for Kettle plans. See [[Ideas]].')) throw new Error('the note is missing its text')
+      const chats = join(vault, 'LocalClaude', 'Chats')
+      const chatNote = () => c.list(chats).find((f) => f.endsWith('.md') && c.read(join(chats, f)).toString().includes('Kettle plans'))
+      await c.until('the chat saved as a note', () => !!chatNote())
+      if (!/^---\ntitle: /.test(c.read(join(chats, chatNote())).toString())) throw new Error('the chat note has no properties')
+      await c.send('remember I like solar kettles', 'Noted.')
+      const memory = join(vault, 'LocalClaude', 'Memory.md')
+      await c.until('memory saved as a note', () => c.read(memory).toString().includes('- I like solar kettles'))
+      await c.page("__t.click(__t.q('.title-menu .menu-trigger'))")
+      await c.menuItem('Open in Obsidian')
+      await c.until('opened in Obsidian', () => c.opened.some((u) => u.startsWith('obsidian://open?path=') && decodeURIComponent(u).endsWith('.md')))
+    }
+  },
+  {
+    name: 'switching Obsidian off stops using the vault, and back on again',
+    run: async (c) => {
+      const toggle = "__t.byText('.modal-body .toggle', 'Use your Obsidian vault').querySelector('input')"
+      await c.openSettings('Obsidian')
+      await c.page(`__t.click(${toggle})`)
+      await c.waitFor('switched off', "__t.q('.obsidian-options').disabled && __t.text('.vault-status').includes('Switched off')")
+      await c.shot('obsidian-off')
+      await c.closeModal()
+      const chats = join(c.file('Brain'), 'LocalClaude', 'Chats')
+      const before = c.list(chats).length
+      await c.page("__t.click(__t.q('.side-new'))")
+      await c.send('search knowledge for bicycle', 'Knowledge: No knowledge server')
+      await c.sleep(2500)
+      if (c.list(chats).length !== before) throw new Error('a chat was saved to the vault while Obsidian was off')
+      await c.page("__t.click(__t.q('.title-menu .menu-trigger'))")
+      await c.waitFor('chat menu', "!!__t.q('.menu-item')")
+      if (await c.page("!!__t.byText('.menu-item', 'Open in Obsidian')")) throw new Error('Open in Obsidian should be hidden while it is off')
+      await c.page("__t.key(window, 'Escape')")
+      await c.waitFor('menu closed', "!__t.q('.menu-item')")
+      await c.openSettings('Obsidian')
+      await c.page(`__t.click(${toggle})`)
+      await c.waitFor('back on', "!__t.q('.obsidian-options').disabled && __t.text('.vault-status').includes('searchable')", 20000)
+      await c.closeModal()
+      await c.send('search knowledge for kettle', 'Knowledge: [1]')
+      await c.until('saved to the vault again', () => c.list(chats).length > before)
     }
   }
 ]

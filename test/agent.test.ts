@@ -9,6 +9,9 @@ import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, rem
 import { createZip, readZip } from '../src/main/zip'
 import { CHAT_TOOLS, ChatIndex, chatText, createChatsServer, snippet, terms } from '../src/main/chatSearch'
 import { imageSize, referencedImages, resultImages, sniffImageType, storeImage } from '../src/main/images'
+import { docxText, extractBuffer, pptxText, xlsxText } from '../src/main/extract'
+import { KNOWLEDGE_TOOLS, KnowledgeIndex, KnowledgeService, NOTE_TOOL, createKnowledgeServer, passages, tokenize } from '../src/main/knowledge'
+import { VaultSync, appFolder, detectVaults, obsidianUri } from '../src/main/obsidian'
 import { contextMenuTemplate } from '../src/main/contextMenu'
 import { notificationFor } from '../src/main/notify'
 import { cleanTitle } from '../src/main/titles'
@@ -18,7 +21,7 @@ import { fitToScreens } from '../src/main/windowState'
 import { resolveStyle } from '../src/shared/styles'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { DEFAULT_EXPORT_OPTIONS } from '../src/shared/types'
 import type { AgentEvent, ChatMessage, SessionMeta, AppSettings } from '../src/shared/types'
 import { DEFAULT_SETTINGS } from '../src/shared/types'
@@ -228,11 +231,13 @@ async function artifactTool() {
 
 function projectPrompt() {
   const project: any = { id: 'p1', name: 'Firmware', description: 'F29 board', instructions: 'Answer in C.', files: [{ id: 'f1', name: 'spec.md', size: 5, addedAt: 0 }, { id: 'f2', name: 'big.txt', size: 9, addedAt: 0 }] }
-  const files = { f1: 'SPEC', f2: 'x'.repeat(PROJECT_KNOWLEDGE_LIMIT + 50) }
+  const files = { f1: 'SPEC', f2: 'small' }
   const out = systemAppend('Be brief.', project, { loadProjectFiles: () => files })!
   assert.ok(out.startsWith('Be brief.'))
   assert.match(out, /<project name="Firmware">/); assert.match(out, /Answer in C\./); assert.match(out, /<file name="spec.md">\nSPEC\n<\/file>/)
-  assert.match(out, /\[truncated: project knowledge limit reached\]/)
+  const huge = systemAppend('', project, { loadProjectFiles: () => ({ f1: 'SPEC', f2: 'x'.repeat(PROJECT_KNOWLEDGE_LIMIT + 50) }) })!
+  assert.match(huge, /<knowledge_files count="2">\n- spec\.md \(4 characters\)\n- big\.txt \(400,050 characters\)/); assert.ok(!huge.includes('xxxx'), 'too much: searched, not sent')
+  assert.match(huge, /use search_knowledge/i)
   assert.equal(systemAppend('', undefined, { loadProjectFiles: () => ({}) }), undefined)
   // chats created in a project use its folder and get the artifacts tool without prompts
   const st = store.getSettings
@@ -251,7 +256,7 @@ function projectPrompt() {
 
 /** In-memory stand-in for SecureStore, enough for memory/export/import. */
 function memStore() {
-  const s = { sessions: [] as SessionMeta[], projects: [] as any[], memory: [] as any[], hist: {} as any, arts: {} as any, files: {} as any, images: new Map<string, Buffer>() }
+  const s = { sessions: [] as SessionMeta[], projects: [] as any[], memory: [] as any[], hist: {} as any, arts: {} as any, files: {} as any, images: new Map<string, Buffer>(), notes: {} as Record<string, string>, settings: { ...DEFAULT_SETTINGS, defaultCwd: process.cwd(), loadUserSettings: false, loadProjectSettings: false } as AppSettings }
   const upsert = (list: any[], x: any) => {
     const i = list.findIndex((y) => y.id === x.id)
     i >= 0 ? (list[i] = x) : list.push(x)
@@ -273,6 +278,9 @@ function memStore() {
     saveProjectFiles: (id: string, f: any) => (s.files[id] = f),
     getGlobalMemory: () => s.memory,
     setGlobalMemory: (m: any[]) => (s.memory = m),
+    getSettings: (): AppSettings => s.settings,
+    getNotePath: (id: string) => s.notes[id],
+    setNotePath: (id: string, rel: string | undefined) => (rel ? (s.notes[id] = rel) : delete s.notes[id]),
     saveImage: (sid: string, id: string, data: Buffer) => s.images.set(`${sid}/${id}`, data),
     loadImage: (sid: string, id: string) => s.images.get(`${sid}/${id}`) ?? null,
     pruneImages: (sid: string, keep: Set<string>) => {
@@ -704,6 +712,189 @@ async function backups() {
   console.log('✓ backups: encryption, wrong password, damage, contents with images, restore, schedule, naming, cleanup')
 }
 
+/** A small valid PDF with one line of text per page. */
+function makePdf(pages: string[]): Buffer {
+  const objs: string[] = ['<< /Type /Catalog /Pages 2 0 R >>', `<< /Type /Pages /Kids [${pages.map((_, i) => `${3 + i * 2} 0 R`).join(' ')}] /Count ${pages.length} >>`]
+  const font = 3 + pages.length * 2
+  pages.forEach((text, i) => {
+    const stream = `BT /F1 18 Tf 72 700 Td (${text}) Tj ET`
+    objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${4 + i * 2} 0 R /Resources << /Font << /F1 ${font} 0 R >> >> >>`)
+    objs.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`)
+  })
+  objs.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+  let out = '%PDF-1.4\n'
+  const offsets: number[] = []
+  objs.forEach((o, i) => {
+    offsets.push(out.length)
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`
+  })
+  const xref = out.length
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + offsets.map((o) => String(o).padStart(10, '0') + ' 00000 n \n').join('')
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+  return Buffer.from(out, 'latin1')
+}
+
+async function knowledgeAndObsidian() {
+  // --- text out of documents
+  const pdf = makePdf(['Quarterly revenue grew 12 percent', 'Page two mentions the giraffe budget'])
+  assert.equal(await extractBuffer(pdf, '.pdf'), '[Page 1]\nQuarterly revenue grew 12 percent\n\n[Page 2]\nPage two mentions the giraffe budget')
+  const docx = createZip([
+    {
+      name: 'word/document.xml',
+      data: '<w:document><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Launch plan</w:t></w:r></w:p><w:p><w:r><w:t xml:space="preserve">Ship on </w:t></w:r><w:r><w:t>Friday &amp; celebrate</w:t></w:r></w:p><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/></w:numPr></w:pPr><w:r><w:t>Book the room</w:t></w:r></w:p></w:body></w:document>'
+    }
+  ])
+  assert.equal(docxText(docx), '# Launch plan\n\nShip on Friday & celebrate\n- Book the room')
+  const pptx = createZip([
+    { name: 'ppt/slides/slide2.xml', data: '<p:sld><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:sld>' },
+    { name: 'ppt/slides/slide1.xml', data: '<p:sld><a:p><a:r><a:t>Hello </a:t></a:r><a:r><a:t>deck</a:t></a:r></a:p><a:p><a:r><a:t>Point two</a:t></a:r></a:p></p:sld>' }
+  ])
+  assert.equal(pptxText(pptx), '## Slide 1\n\nHello deck\nPoint two\n\n## Slide 2\n\nSecond')
+  const xlsx = createZip([
+    { name: 'xl/workbook.xml', data: '<workbook><sheets><sheet name="Budget" sheetId="1" r:id="rId1"/></sheets></workbook>' },
+    { name: 'xl/sharedStrings.xml', data: '<sst><si><t>Item</t></si><si><t>Cost</t></si><si><r><t>Tea</t></r><r><t>pot</t></r></si></sst>' },
+    { name: 'xl/worksheets/sheet1.xml', data: '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>12.5</v></c><c r="C2" t="inlineStr"><is><t>note</t></is></c></row></sheetData></worksheet>' }
+  ])
+  assert.equal(xlsxText(xlsx), '## Budget\n\nItem | Cost\nTeapot | 12.5 | note')
+  assert.equal(await extractBuffer(Buffer.from('\uFEFFplain notes'), '.md'), 'plain notes')
+  await assert.rejects(extractBuffer(Buffer.from([1, 0, 2, 3]), '.bin'), /not a text file/)
+  await assert.rejects(extractBuffer(Buffer.from('nope'), '.pdf'), /not a readable PDF/)
+  await assert.rejects(extractBuffer(createZip([{ name: 'a.txt', data: 'a' }]), '.docx'), /not a Word document/)
+
+  // --- passages and ranking
+  // plurals fold the same way in questions and notes (so "Paris" becomes "pari" on both sides)
+  assert.deepEqual(tokenize('The Bicycles of Paris, and 2 cafés'), ['bicycle', 'pari', 'café'])
+  const longDoc = '# Intro\n\nSome intro words.\n\n# Budget\n\n' + 'The giraffe budget is large. '.repeat(10) + '\n\n' + 'Filler about nothing much at all. '.repeat(80)
+  const ps = passages(longDoc)
+  assert.equal(ps[0].heading, 'Intro'); assert.ok(ps.some((p) => p.heading === 'Budget')); assert.ok(ps.every((p) => p.end - p.start <= 1200))
+  const idx = new KnowledgeIndex([
+    { name: 'report.pdf', source: 'project files', text: await extractBuffer(pdf, '.pdf') },
+    { name: 'Daily/2026-10-01.md', source: 'vault', text: 'Bought a red bicycle today.\n\nThe bicycles were cheap.' },
+    { name: 'Ideas.md', source: 'vault', text: 'A solar kettle. Also a bicycle bell.' },
+    { name: 'Giraffe facts.md', source: 'vault', text: 'Tall animals.' }
+  ])
+  assert.equal(idx.search('bicycle')[0].doc.name, 'Daily/2026-10-01.md', 'more mentions rank higher')
+  assert.equal(idx.search('bicycle').length, 2)
+  assert.deepEqual(new Set(idx.search('giraffe').map((h) => h.doc.name)), new Set(['report.pdf', 'Giraffe facts.md']), 'file names count')
+  assert.equal(idx.search('revenue')[0].passage.heading, '[Page 1]')
+  assert.equal(idx.search('"red bicycle"')[0].doc.name, 'Daily/2026-10-01.md')
+  assert.deepEqual(idx.search('the of and'), [], 'only common words')
+
+  // --- the tools: search, read, list, and writing notes into the vault
+  const dir = mkdtempSync(join(tmpdir(), 'lc-kb-'))
+  const vault = join(dir, 'Brain')
+  mkdirSync(join(vault, '.obsidian'), { recursive: true })
+  const saved: string[] = []
+  const srv: any = createKnowledgeServer({ indexes: async () => [idx], describe: 'test knowledge', notes: { root: vault, folder: 'LocalClaude' }, onNoteSaved: (f) => saved.push(f) })
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  await srv.instance.connect(a)
+  const client = new Client({ name: 't', version: '1' })
+  await client.connect(b)
+  assert.deepEqual((await client.listTools()).tools.map((t) => t.name).sort(), ['list_knowledge', 'read_knowledge', 'save_note', 'search_knowledge'])
+  const call = async (name: string, args: any) => (await client.callTool({ name, arguments: args })) as any
+  const text = (r: any) => r.content[0].text as string
+  assert.match(text(await call('search_knowledge', { query: 'bicycle' })), /^\[1\] Daily\/2026-10-01\.md \(vault; chars 0-\d+\)\nBought a red bicycle/)
+  assert.match(text(await call('search_knowledge', { query: 'unicorn' })), /Nothing matches/)
+  assert.match(text(await call('read_knowledge', { name: 'ideas' })), /^Ideas\.md \(vault; chars 0-36 of 36\)\n\nA solar kettle/)
+  assert.match(text(await call('read_knowledge', { name: 'report.pdf', offset: 9, max_chars: 500 })), /chars 9-\d+ of \d+/)
+  assert.ok((await call('read_knowledge', { name: 'nope' })).isError)
+  assert.match(text(await call('list_knowledge', { filter: 'daily' })), /^- Daily\/2026-10-01\.md \(vault, 53 chars\)$/)
+  assert.match(text(await call('save_note', { title: 'Kettle plans', content: 'Solar kettle, see [[Ideas]].' })), /Saved LocalClaude\/Notes\/Kettle plans\.md/)
+  const note = join(vault, 'LocalClaude', 'Notes', 'Kettle plans.md')
+  assert.match(readFileSync(note, 'utf8'), /^---\ncreated: .*\nsource: LocalClaude\n---\n\nSolar kettle, see \[\[Ideas\]\]\.\n$/); assert.deepEqual(saved, [note])
+  assert.ok((await call('save_note', { title: 'Kettle plans', content: 'again' })).isError, "existing notes aren't overwritten")
+  await call('save_note', { title: 'Kettle plans', content: 'Buy a panel.', append: true })
+  assert.match(readFileSync(note, 'utf8'), /Solar kettle[\s\S]*_Added by Claude, .*_\n\nBuy a panel\.\n$/)
+  await call('save_note', { title: 'Escape', content: 'x', subfolder: '../../..' })
+  assert.ok(existsSync(join(vault, 'LocalClaude', 'Notes', '_', '_', '_', 'Escape.md')), 'notes stay inside the notes folder')
+
+  // --- linked folders are read live; hidden folders and dependencies are skipped
+  const folder = join(dir, 'kb')
+  mkdirSync(join(folder, 'sub'), { recursive: true }); mkdirSync(join(folder, '.obsidian')); mkdirSync(join(folder, 'node_modules'))
+  writeFileSync(join(folder, 'a.md'), 'alpha zebra'); writeFileSync(join(folder, 'sub', 'b.txt'), 'beta'); writeFileSync(join(folder, 'sub', 'deck.pptx'), pptx)
+  writeFileSync(join(folder, '.obsidian', 'x.md'), 'hidden zebra'); writeFileSync(join(folder, 'node_modules', 'y.md'), 'zebra'); writeFileSync(join(folder, 'pic.png'), png(1, 1))
+  const svc = new KnowledgeService()
+  let f = await svc.folder(folder, 'folder kb')
+  assert.deepEqual(f.index.docs.map((d) => d.name).sort(), ['a.md', 'sub/b.txt', 'sub/deck.pptx']); assert.equal(f.index.search('zebra').length, 1)
+  assert.equal(f.index.search('deck')[0].doc.name, 'sub/deck.pptx')
+  writeFileSync(join(folder, 'c.md'), 'zebra again')
+  svc.invalidate(folder)
+  f = await svc.folder(folder, 'folder kb')
+  assert.equal(f.index.search('zebra').length, 2, 'new notes are found')
+  assert.equal(svc.project('p', 1, [{ id: 'f', name: 'x.md' }], () => ({ f: 'okapi' })).search('okapi').length, 1)
+
+  // --- Obsidian: finding vaults, links, and keeping chats and memory as notes
+  writeFileSync(join(dir, 'obsidian.json'), JSON.stringify({ vaults: { a: { path: vault, ts: 2, open: true }, b: { path: join(dir, 'gone'), ts: 3 } } }))
+  assert.deepEqual(detectVaults(join(dir, 'obsidian.json')), [{ path: vault, name: 'Brain', open: true }], 'vaults that no longer exist are left out')
+  assert.deepEqual(detectVaults(join(dir, 'none.json')), [])
+  assert.equal(obsidianUri('C:\\v\\a b.md'), 'obsidian://open?path=C%3A%5Cv%5Ca%20b.md')
+  assert.equal(appFolder(vault, '../../outside'), join(vault, 'outside')); assert.equal(appFolder(vault, ''), join(vault, 'LocalClaude'))
+  const st: any = memStore()
+  const day = new Date(2026, 9, 6, 9, 30).getTime()
+  const img = { id: '9f3c1b2a-1111-4222-8333-944455556666', mediaType: 'image/png' }
+  st.upsertSession({ id: 'v1', title: 'Garden plans', cwd: 'C:\\x', createdAt: day, updatedAt: day })
+  st.saveHistory('v1', [
+    { id: 'u', role: 'user', ts: day, parts: [{ kind: 'text', text: 'What should I plant?' }], images: 1, imageRefs: [img] },
+    { id: 'a', role: 'assistant', ts: day, parts: [{ kind: 'text', text: 'Peas and lettuce.' }] }
+  ])
+  st.saveImage('v1', img.id, png(2, 2))
+  st.s = st._s
+  const settings = { ...st.getSettings(), obsidianVault: vault, obsidianSyncChats: true, obsidianSyncMemory: true }
+  const sync = new VaultSync(st, () => settings, 0)
+  const chatFile = sync.writeChat('v1')!
+  assert.equal(chatFile, join(vault, 'LocalClaude', 'Chats', '2026-10-06 Garden plans.md'))
+  const chatNoteText = readFileSync(chatFile, 'utf8')
+  assert.match(chatNoteText, /^---\ntitle: "Garden plans"\ncreated: 2026-10-06 09:30\n/); assert.match(chatNoteText, /tags: \[localclaude, chat\]\nlocalclaude_id: v1\n---\n\n# Garden plans/)
+  assert.ok(chatNoteText.includes(`![image](<attachments/${img.id}.png>)`)); assert.match(chatNoteText, /Peas and lettuce\./)
+  assert.ok(existsSync(join(vault, 'LocalClaude', 'Chats', 'attachments', img.id + '.png')))
+  assert.equal(st.getNotePath('v1'), 'LocalClaude/Chats/2026-10-06 Garden plans.md')
+  st.upsertSession({ ...st.getSession('v1'), title: 'Vegetable garden' })
+  const renamed = sync.writeChat('v1')!
+  assert.ok(renamed.endsWith('2026-10-06 Vegetable garden.md') && existsSync(renamed) && !existsSync(chatFile), 'renaming the chat renames its note')
+  assert.equal(sync.notePath('v1'), renamed)
+  // another chat with the same title on the same day gets its own note
+  st.upsertSession({ id: 'v2', title: 'Vegetable garden', cwd: 'C:\\x', createdAt: day, updatedAt: day })
+  st.saveHistory('v2', [{ id: 'w', role: 'user', ts: day, parts: [{ kind: 'text', text: 'A different garden' }] }])
+  const twin = sync.writeChat('v2')!
+  assert.ok(twin.endsWith('2026-10-06 Vegetable garden (2).md'), twin); assert.match(readFileSync(renamed, 'utf8'), /localclaude_id: v1\n/, "the first chat's note is untouched")
+  assert.equal(sync.writeChat('v2'), twin, 'and it stays put'); assert.equal(sync.writeChat('v1'), renamed)
+  st.setGlobalMemory([{ id: 'g', text: 'Likes kettles', source: 'you', createdAt: 1 }])
+  st.upsertProject({ id: 'p9', name: 'Allotment', description: '', instructions: '', files: [], memory: [{ id: 'm', text: 'Plot 14', source: 'claude', createdAt: 1 }], createdAt: 1, updatedAt: 1 })
+  assert.match(readFileSync(sync.writeMemory()!, 'utf8'), /## Everywhere\n\n- Likes kettles\n\n## Allotment\n\n- Plot 14\n$/)
+  st.saveHistory('v1', [...st.loadHistory('v1'), { id: 'u2', role: 'user', ts: day, parts: [{ kind: 'text', text: 'And tomatoes?' }] }])
+  sync.chatChanged('v1')
+  await new Promise((r) => setTimeout(r, 30))
+  assert.match(readFileSync(renamed, 'utf8'), /And tomatoes\?/, 'updated after a change')
+  settings.obsidianSyncChats = false
+  st.saveHistory('v1', [...st.loadHistory('v1'), { id: 'u3', role: 'user', ts: day, parts: [{ kind: 'text', text: 'Radishes?' }] }])
+  sync.chatChanged('v1')
+  await new Promise((r) => setTimeout(r, 30))
+  assert.ok(!readFileSync(renamed, 'utf8').includes('Radishes'), 'off: notes are left alone')
+
+  // --- chats get the knowledge tools when there's something to search
+  const kmgr = new SessionManager(st, () => {}, { transcriptExists: () => true, knowledge: svc })
+  st.upsertProject({ id: 'pk', name: 'Research', description: '', instructions: '', files: [], folders: [folder], createdAt: 1, updatedAt: 1 })
+  const plain = kmgr.create(process.cwd())
+  assert.equal((kmgr as any).get(plain.id).buildOptions().mcpServers.knowledge, undefined, 'nothing to search: no tools')
+  const inProject = kmgr.create(undefined, 'pk')
+  const po = (kmgr as any).get(inProject.id).buildOptions()
+  assert.equal(po.mcpServers.knowledge?.type, 'sdk'); assert.ok(KNOWLEDGE_TOOLS.every((t) => po.allowedTools.includes(t))); assert.ok(!po.allowedTools.includes(NOTE_TOOL))
+  assert.match(po.systemPrompt.append, /<linked_folders>\n- .*kb\n<\/linked_folders>/)
+  Object.assign(st._s.settings, { obsidianVault: vault, obsidianSearch: true, obsidianWrite: true })
+  const vo = (kmgr as any).get(plain.id).buildOptions()
+  assert.equal(vo.mcpServers.knowledge?.type, 'sdk'); assert.ok(vo.allowedTools.includes(NOTE_TOOL))
+  assert.match(vo.systemPrompt.append, /<obsidian>\nThe user's Obsidian vault "Brain" is linked[\s\S]*save_note \(it goes in LocalClaude\/Notes\)/)
+  // switched off: nothing in the vault is searched, written or synced, but the link stays
+  st._s.settings.obsidianEnabled = false
+  const off = (kmgr as any).get(plain.id).buildOptions()
+  assert.equal(off.mcpServers.knowledge, undefined); assert.ok(!(off.systemPrompt.append ?? '').includes('<obsidian>'))
+  assert.equal(st._s.settings.obsidianVault, vault, 'the link is kept')
+  Object.assign(settings, { obsidianEnabled: false, obsidianSyncChats: true })
+  assert.equal(sync.writeChat('v1'), null); assert.equal(sync.writeMemory(), null); assert.equal(sync.notePath('v1'), null)
+  rmSync(dir, { recursive: true, force: true })
+  console.log('✓ knowledge & Obsidian: PDF/Word/PowerPoint/Excel text, passages, ranking, tools, notes, linked folders, vaults, chat and memory notes')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -747,6 +938,7 @@ await reliabilityAndUx()
 await chatSearch()
 await imagesInChats()
 await backups()
+await knowledgeAndObsidian()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')
