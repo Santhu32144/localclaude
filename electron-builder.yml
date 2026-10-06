@@ -1,0 +1,33 @@
+appId: com.parthasarathym.localclaude
+productName: LocalClaude
+copyright: Personal use only
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+  # Only the glibc binary is needed on normal Linux desktops
+  - '!node_modules/@anthropic-ai/claude-agent-sdk-linux-*-musl/**'
+# The native Claude Code binary must live outside the asar archive to be executable.
+asarUnpack:
+  - node_modules/@anthropic-ai/claude-agent-sdk-*/**
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  syncDesktopName: true
+  icon: build/icon.png
+  maintainer: Parthasarathy M <parthasarathym20@gmail.com>
+win:
+  target:
+    - nsis
+  icon: build/icon.png
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+publish: null
