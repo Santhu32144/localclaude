@@ -38,6 +38,7 @@ import { PROJECT_KNOWLEDGE_LIMIT_CHARS } from './limits'
 import { transcriptExists } from './transcripts'
 import { fetchUsage } from './usage'
 import { resolveStyle } from '../shared/styles'
+import { log } from './log'
 import { MEMORY_TOOLS, createMemoryServer, memoryPrompt } from './memory'
 import type { SecureStore } from './store'
 
@@ -267,7 +268,9 @@ class AgentSession {
       // Back up files before Claude edits them so any user message can be rewound to.
       enableFileCheckpointing: true,
       abortController: this.abort,
+      // Claude Code only writes here when something is off: keep it in the log
       stderr: (d) => {
+        log('warn', `[claude code] ${d.trim()}`)
         if (process.env.LOCALCLAUDE_DEBUG) console.error('[claude]', d)
       }
     }

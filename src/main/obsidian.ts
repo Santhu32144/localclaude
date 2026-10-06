@@ -7,6 +7,7 @@ import { safeFileName } from '../shared/format'
 import type { AppSettings, Artifact, ChatMessage, ImageRef, MemoryItem, ObsidianVault, Project, SessionMeta } from '../shared/types'
 import { chatMarkdown, fmtTime } from './exporter'
 import { IMAGE_EXT } from './images'
+import { log } from './log'
 import type { SecureStore } from './store'
 
 /** Where Obsidian lists its vaults. */
@@ -116,8 +117,9 @@ export class VaultSync {
         this.timers.delete(key)
         try {
           fn()
-        } catch {
-          /* the vault may be offline or read-only: try again next time */
+        } catch (e) {
+          // the vault may be offline or read-only: it's tried again next time
+          log('warn', 'saving to the Obsidian vault failed:', e)
         }
       }, this.delayMs)
     )

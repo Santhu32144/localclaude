@@ -35,6 +35,7 @@ import { createWorktree, gitStatus } from './git'
 import { testMcpServer } from './mcpCheck'
 import { IMAGE_EXT, sniffImageType, thumbnail } from './images'
 import { KnowledgeService } from './knowledge'
+import { captureMainProcess, log, logFile } from './log'
 import { VaultSync, activeVault, detectVaults, obsidianUri } from './obsidian'
 import { notificationFor } from './notify'
 import { generateTitle } from './titles'
@@ -62,6 +63,7 @@ if (!app.requestSingleInstanceLock()) app.quit()
 if (process.platform === 'win32') app.setAppUserModelId('com.parthasarathym.localclaude')
 /** End-to-end tests: hidden window, no global shortcut, no notifications. */
 const TEST_MODE = !!process.env.LOCALCLAUDE_TEST_MODE
+captureMainProcess()
 
 let win: BrowserWindow | null = null
 const store = new SecureStore()
@@ -167,10 +169,13 @@ function registerIpc(): void {
       arch: process.arch,
       electron: process.versions.electron,
       claudeBinary: resolveClaudeBinary() ?? null,
-      userData: app.getPath('userData')
+      userData: app.getPath('userData'),
+      logFile: logFile()
     }),
     true
   )
+  handle('log:reveal', () => shell.showItemInFolder(logFile()), true)
+  handle('log:renderer', (message: string) => log('error', `[window] ${String(message).slice(0, 4000)}`), true)
 
   // ---- auth (your Claude subscription, via Claude Code's own login)
   handle('auth:status', () => authStatus())
@@ -575,9 +580,11 @@ async function runAutoBackup(): Promise<BackupResult> {
   try {
     const r = await writeBackupTo(store, s.backupDir || defaultBackupDir(), password, s.backupKeep)
     store.setBackupState({ lastAt: Date.now(), lastFile: r.path, lastSize: r.size, lastError: undefined })
+    log('info', `backup written (${Math.round(r.size / 1024)} KB)`)
     return { ok: true, ...r }
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e)
+    log('error', 'automatic backup failed:', e)
     store.setBackupState({ lastError: error })
     return { ok: false, error }
   } finally {
@@ -608,6 +615,7 @@ function warmVault(): void {
 
 /** Chats and memory follow into the vault as notes (when those options are on). */
 function syncToVault(e: AgentEvent): void {
+  if (e.type === 'error') log('warn', `chat ${e.sessionId.slice(0, 8)}: ${e.text.slice(0, 500)}`)
   if (e.type === 'turn-done') vaultSync.chatChanged(e.sessionId)
   else if (e.type === 'meta') vaultSync.chatChanged(e.meta.id)
   else if (e.type === 'global-memory' || e.type === 'project') vaultSync.memoryChanged()
@@ -674,7 +682,9 @@ function applyQuickShortcut(accelerator: string): void {
 }
 
 app.whenReady().then(() => {
+  log('info', `LocalClaude ${app.getVersion()} starting (Electron ${process.versions.electron}, ${process.platform} ${process.arch})`)
   store.open()
+  if (!store.lock.ok) log('warn', 'data locked:', store.lock.reason ?? '')
   if (store.lock.ok) nativeTheme.themeSource = store.getSettings().theme
   manager = new SessionManager(
     store,

@@ -383,6 +383,12 @@ export function SettingsDialog(props: {
                     {info?.userData}
                   </a>
                 </span>
+                <span>Log</span>
+                <span className="mono small">
+                  <a href="#" title="Show the log file (what happened, not what you wrote)" onClick={(e) => (e.preventDefault(), void api.revealLog())}>
+                    {info?.logFile}
+                  </a>
+                </span>
               </div>
               <p className="muted small">
                 Personal app built on the Claude Agent SDK, for your own use with your own Claude subscription.

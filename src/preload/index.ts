@@ -47,7 +47,7 @@ const api = {
   lockStatus: () => inv<LockStatus>('app:lockStatus'),
   resetData: () => inv<LockStatus>('app:resetData'),
   appInfo: () =>
-    inv<{ version: string; platform: string; arch: string; electron: string; claudeBinary: string | null; userData: string }>('app:info'),
+    inv<{ version: string; platform: string; arch: string; electron: string; claudeBinary: string | null; userData: string; logFile: string }>('app:info'),
 
   authStatus: () => inv<AuthStatus>('auth:status'),
   login: () => inv<void>('auth:login'),
@@ -89,6 +89,8 @@ const api = {
   pathForFile: (f: File) => webUtils.getPathForFile(f),
   openPath: (p: string) => inv<string>('shell:openPath', p),
   openExternal: (url: string) => inv<void>('shell:openExternal', url),
+  revealLog: () => inv<void>('log:reveal'),
+  logError: (message: string) => inv<void>('log:renderer', message),
   gitStatus: (cwd: string) => inv<GitStatus | null>('git:status', cwd),
   testMcpServer: (entry: McpServerEntry) => inv<McpTestResult>('mcp:test', entry),
   createWorktree: (sessionId: string, name: string) => inv<SessionMeta>('git:worktree', sessionId, name),
