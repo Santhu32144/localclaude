@@ -10,6 +10,7 @@ export type Step = ToolPart | ThinkingPart
 export const COMPUTER_TOOL = 'mcp__computer-use__computer'
 export const isArtifactTool = (name: string): boolean => name.startsWith('mcp__artifacts__')
 export const isMemoryTool = (name: string): boolean => name.startsWith('mcp__memory__')
+export const isChatsTool = (name: string): boolean => name.startsWith('mcp__chats__')
 
 export function parsedInput(p: ToolPart): Record<string, unknown> {
   if (p.input && typeof p.input === 'object' && Object.keys(p.input as object).length) return p.input as Record<string, unknown>
@@ -80,6 +81,10 @@ export function stepText(p: Step): { icon: string; title: string; detail?: strin
       return { icon: 'memory', title: `${v('Saved to memory', 'Saving to memory')}: “${short(input.text, 70)}”` }
     case 'mcp__memory__forget':
       return { icon: 'memory', title: v('Removed a memory', 'Removing a memory') }
+    case 'mcp__chats__search_chats':
+      return { icon: 'search', title: `${v('Searched your chats for', 'Searching your chats for')} “${short(input.query, 50)}”` }
+    case 'mcp__chats__read_chat':
+      return { icon: 'chat', title: v('Read an earlier chat', 'Reading an earlier chat') }
     case COMPUTER_TOOL: {
       const c = input.coordinate as number[] | undefined
       const at = c ? ` at (${c.join(', ')})` : ''
@@ -142,6 +147,7 @@ export function summarize(steps: Step[]): string {
   let tools = 0
   let todos = false
   let memory = false
+  let pastChats = false
   let thought = false
   for (const s of steps) {
     if (s.kind === 'thinking') {
@@ -187,6 +193,7 @@ export function summarize(steps: Step[]): string {
         break
       default:
         if (isMemoryTool(s.name)) memory = true
+        else if (isChatsTool(s.name)) pastChats = true
         else tools++
     }
   }
@@ -202,6 +209,7 @@ export function summarize(steps: Step[]): string {
   if (tools) out.push(`used ${plural(tools, 'tool')}`)
   if (todos) out.push('updated tasks')
   if (memory) out.push('updated memory')
+  if (pastChats) out.push('looked through past chats')
   if (!out.length) return thought ? 'Thought process' : 'Worked'
   return cap(out.join(', '))
 }

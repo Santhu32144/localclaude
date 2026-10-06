@@ -7,6 +7,7 @@ import type {
   AgentEvent,
   AppSettings,
   ChatMessage,
+  ChatSearchHit,
   ContentPart,
   DiffHunk,
   McpStatus,
@@ -23,6 +24,7 @@ import type {
 } from '../shared/types'
 import { resolveClaudeBinary, subscriptionEnv } from './claude'
 import { ARTIFACT_TOOLS, createArtifactServer } from './artifacts'
+import { CHAT_TOOLS, ChatIndex, createChatsServer } from './chatSearch'
 import { createComputerServer } from './computer'
 import { query } from './sdk'
 import { importedContext } from './exporter'
@@ -76,6 +78,8 @@ export interface SessionDeps {
   transcriptExists: (sdkSessionId: string, cwd: string) => boolean
   /** a short title for a new chat from its first exchange, or null */
   titleFor?: (firstUser: string, firstReply: string) => Promise<string | null>
+  /** full-text index of all chats (for Claude's chat search tool) */
+  chatIndex?: ChatIndex
 }
 
 class AgentSession {
@@ -169,8 +173,10 @@ class AgentSession {
           else this.emitRaw({ type: 'global-memory', items: this.store.getGlobalMemory() })
         }
       })
-    // Artifacts and memory only write to LocalClaude's own storage, so they never need a prompt.
-    const autoAllowed = [...(s.artifacts ? ARTIFACT_TOOLS : []), ...(s.memory ? MEMORY_TOOLS : [])]
+    if (s.chatSearch && this.deps.chatIndex)
+      mcpServers['chats'] = createChatsServer({ index: this.deps.chatIndex, store: this.store, sessionId: this.meta.id, projectId: project?.id })
+    // These only read or write LocalClaude's own storage, so they never need a prompt.
+    const autoAllowed = [...(s.artifacts ? ARTIFACT_TOOLS : []), ...(s.memory ? MEMORY_TOOLS : []), ...(s.chatSearch && this.deps.chatIndex ? CHAT_TOOLS : [])]
 
     this.abort = new AbortController()
     this.startedWithBypass = this.meta.permissionMode === 'bypassPermissions'
@@ -887,13 +893,20 @@ export class SessionManager {
   private sessions = new Map<string, AgentSession>()
   models: { value: string; displayName: string; description: string }[] = []
   private deps: SessionDeps
+  /** full-text search over every chat */
+  readonly index: ChatIndex
 
   constructor(
     private store: SecureStore,
     private emit: Emit,
     deps: Partial<SessionDeps> = {}
   ) {
-    this.deps = { transcriptExists: deps.transcriptExists ?? transcriptExists, titleFor: deps.titleFor }
+    this.index = new ChatIndex(store, (id) => this.sessions.get(id)?.history)
+    this.deps = { transcriptExists: deps.transcriptExists ?? transcriptExists, titleFor: deps.titleFor, chatIndex: this.index }
+  }
+
+  searchChats(query: string): ChatSearchHit[] {
+    return this.index.search(query, { limit: 40 })
   }
 
   private get(id: string): AgentSession {
@@ -998,6 +1011,7 @@ export class SessionManager {
     this.sessions.get(id)?.shutdown()
     this.sessions.delete(id)
     this.store.deleteSession(id)
+    this.index.forget(id)
   }
   /** Save every open chat's history now (before exporting). */
   flushAll(): void {

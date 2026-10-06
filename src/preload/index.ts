@@ -10,6 +10,7 @@ import type {
   PermissionDecision,
   PermissionModeUI,
   Artifact,
+  ChatSearchHit,
   ExportRequest,
   ExportResult,
   ImportResult,
@@ -104,6 +105,7 @@ const api = {
   clearMemory: (projectId: string | null) => inv<MemoryState>('memory:clear', projectId),
 
   usage: () => inv<PlanUsage>('usage:get'),
+  searchChats: (query: string) => inv<ChatSearchHit[]>('search:chats', query),
   setStyle: (id: string, style: string) => inv<void>('chat:setStyle', id, style),
   shortcutStatus: () => inv<{ accelerator: string; ok: boolean }>('shortcut:status'),
   /** a notification was clicked: show that chat */

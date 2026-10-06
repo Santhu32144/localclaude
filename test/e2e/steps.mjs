@@ -172,5 +172,53 @@ export const steps = [
       await c.page("__t.click(__t.byText('.group-row .group-label', 'Today'))")
       await c.waitFor('Today open', "!__t.qa('.side-section.closed').some((s) => s.textContent.includes('Today'))")
     }
+  },
+  {
+    name: 'search inside messages from the sidebar',
+    run: async (c) => {
+      await c.page("__t.setValue(__t.q('.side-search input'), 'teal')")
+      await c.waitFor('message hits', "!!__t.byText('.side-section .group-label', 'In messages') && !!__t.q('.search-hit .hit-snippet mark')")
+      await c.shot('search-hits')
+      await c.page("__t.click(__t.q('.search-hit'))")
+      await c.waitFor('find bar with matches', "__t.q('.find-input')?.value === 'teal' && /^\\d+\\/\\d+$/.test(__t.text('.find-count'))")
+      await c.waitFor('chat opened', "__t.qa('.turn').some((t) => t.innerText.includes('Noted.'))")
+      await c.shot('find-in-chat')
+      await c.page("__t.key(__t.q('.find-input'), 'Escape')")
+      await c.waitFor('find bar closed', "!__t.q('.find-bar')")
+      await c.page("__t.setValue(__t.q('.side-search input'), '')")
+      await c.waitFor('chat list back', "!__t.q('.search-hit') && __t.qa('.session-item').length >= 2")
+    }
+  },
+  {
+    name: 'Ctrl+F finds text in the open chat',
+    run: async (c) => {
+      await c.page("__t.key(window, 'f', { ctrlKey: true })")
+      await c.waitFor('find bar', "!!__t.q('.find-bar') && document.activeElement === __t.q('.find-input')")
+      await c.page("__t.setValue(__t.q('.find-input'), 'not-in-this-chat')")
+      await c.waitFor('no results', "__t.text('.find-count') === 'No results'")
+      await c.page("__t.setValue(__t.q('.find-input'), 'please')")
+      await c.waitFor('several matches', "/^1\\/[2-9]/.test(__t.text('.find-count'))")
+      await c.page("__t.key(__t.q('.find-input'), 'Enter')")
+      await c.waitFor('next match', "__t.text('.find-count').startsWith('2/')")
+      await c.page("__t.key(__t.q('.find-input'), 'Enter', { shiftKey: true })")
+      await c.waitFor('previous match', "__t.text('.find-count').startsWith('1/')")
+      await c.page("__t.key(__t.q('.find-input'), 'Escape')")
+      await c.waitFor('closed', "!__t.q('.find-bar')")
+      // switching chats doesn't bring it back
+      await c.page("__t.click(__t.qa('.session-item').find((e) => !e.classList.contains('active')))")
+      await c.sleep(300)
+      if (await c.page("!!__t.q('.find-bar')")) throw new Error('find bar reopened in another chat')
+    }
+  },
+  {
+    name: 'Claude searches earlier chats',
+    run: async (c) => {
+      await c.page("__t.click(__t.q('.side-new'))")
+      await c.send('search my chats for teal', 'Found: [')
+      const reply = await c.page("__t.qa('.turn').at(-1).innerText")
+      if (!reply.includes('Chat about hello')) throw new Error('expected the chat that mentions teal, got: ' + reply)
+      if (!reply.includes('Looked through past chats')) throw new Error('the step summary should say what Claude did, got: ' + reply)
+      await c.shot('claude-searched-chats')
+    }
   }
 ]

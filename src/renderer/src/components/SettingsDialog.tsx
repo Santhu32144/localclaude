@@ -345,6 +345,16 @@ export function SettingsDialog(props: {
                 />
               </div>
               <label className="toggle">
+                <input type="checkbox" checked={s.chatSearch} onChange={(e) => void props.onChange({ chatSearch: e.target.checked })} />
+                <span>
+                  <b>Let Claude search your past chats</b>
+                  <span className="muted small">
+                    When you mention an earlier conversation, Claude can look it up and read it. In a project it searches that project’s chats.
+                    Everything stays on this machine.
+                  </span>
+                </span>
+              </label>
+              <label className="toggle">
                 <input type="checkbox" checked={s.artifacts} onChange={(e) => void props.onChange({ artifacts: e.target.checked })} />
                 <span>
                   <b>Artifacts</b>

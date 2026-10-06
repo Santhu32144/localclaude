@@ -28,6 +28,8 @@ export interface AppSettings {
   artifacts: boolean
   /** Claude keeps a memory of useful facts across chats (per project, and global) */
   memory: boolean
+  /** Claude can search and read your earlier chats */
+  chatSearch: boolean
   /** Load ~/.claude (user) + project settings: CLAUDE.md, skills, slash commands, plugins, hooks */
   loadUserSettings: boolean
   loadProjectSettings: boolean
@@ -268,6 +270,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   computerUse: false,
   artifacts: true,
   memory: true,
+  chatSearch: true,
   loadUserSettings: true,
   loadProjectSettings: true,
   mcpServers: {},
@@ -434,4 +437,14 @@ export interface PlanUsage {
   extra: { enabled: boolean; utilization: number | null; used: number | null; limit: number | null; currency: string | null } | null
   fetchedAt: number
   error?: string
+}
+
+/** A chat that matches a search, with a bit of context around the match. */
+export interface ChatSearchHit {
+  sessionId: string
+  title: string
+  projectId?: string
+  updatedAt: number
+  snippet: string
+  matches: number
 }

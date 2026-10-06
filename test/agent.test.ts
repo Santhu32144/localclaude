@@ -6,6 +6,7 @@ import { ARTIFACT_TOOLS, createArtifactServer, renderArtifactPage } from '../src
 import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup } from '../src/main/exporter'
 import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
 import { createZip, readZip } from '../src/main/zip'
+import { CHAT_TOOLS, ChatIndex, chatText, createChatsServer, snippet, terms } from '../src/main/chatSearch'
 import { contextMenuTemplate } from '../src/main/contextMenu'
 import { notificationFor } from '../src/main/notify'
 import { cleanTitle } from '../src/main/titles'
@@ -20,6 +21,7 @@ import { DEFAULT_EXPORT_OPTIONS } from '../src/shared/types'
 import type { AgentEvent, ChatMessage, SessionMeta, AppSettings } from '../src/shared/types'
 import { DEFAULT_SETTINGS } from '../src/shared/types'
 import { applyEvent } from '../src/shared/reducer'
+import { stepText, summarize } from '../src/shared/steps'
 import { countChanges, diffStrings, linesFromPatch } from '../src/shared/diff'
 import assert from 'node:assert/strict'
 
@@ -233,8 +235,8 @@ function projectPrompt() {
   const meta = mgr.create(undefined, 'p1')
   assert.equal(meta.projectId, 'p1'); assert.equal(meta.cwd, 'C:\\proj')
   const opts = (mgr as any).get(meta.id).buildOptions()
-  assert.equal(opts.mcpServers.artifacts?.type, 'sdk'); assert.equal(opts.mcpServers.memory?.type, 'sdk')
-  assert.deepEqual(opts.allowedTools, [...ARTIFACT_TOOLS, ...MEMORY_TOOLS], 'artifacts and memory never prompt')
+  assert.equal(opts.mcpServers.artifacts?.type, 'sdk'); assert.equal(opts.mcpServers.memory?.type, 'sdk'); assert.equal(opts.mcpServers.chats?.type, 'sdk')
+  assert.deepEqual(opts.allowedTools, [...ARTIFACT_TOOLS, ...MEMORY_TOOLS, ...CHAT_TOOLS], 'artifacts, memory and chat search never prompt')
   assert.deepEqual(opts.settings, { autoMemoryEnabled: false, enableArtifact: false }, "Claude Code's own memory files and cloud Artifact tool stay off")
   assert.match(opts.systemPrompt.append, /Answer in C\./)
   store.getSettings = st
@@ -484,6 +486,70 @@ async function reliabilityAndUx() {
   console.log('✓ reliability & UX: 30-day transcript recovery, AI titles, styles, notifications, right-click menu, window state, usage')
 }
 
+async function chatSearch() {
+  const st: any = memStore()
+  const msg = (id: string, role: string, text: string, extra: any = {}) => ({ id, role, ts: 1, parts: [{ kind: 'text', text }], ...extra })
+  const chat = (id: string, title: string, updatedAt: number, projectId: string | undefined, history: any[]) => {
+    st.upsertSession({ id, title, cwd: 'C:\\x', createdAt: 1, updatedAt, projectId })
+    st.saveHistory(id, history)
+  }
+  chat('c1', 'Garden plans', 100, undefined, [msg('1', 'user', 'What should I plant in spring?'), msg('2', 'assistant', 'Peas and lettuce do well in cool weather.')])
+  chat('c2', 'Router setup', 200, 'p1', [
+    msg('3', 'user', 'My teal router keeps dropping wifi'),
+    { id: '4', role: 'assistant', ts: 1, parts: [{ kind: 'tool', id: 't', name: 'Bash', input: {}, result: 'teal teal teal', done: true }, { kind: 'text', text: 'Try changing the wifi channel.' }] },
+    msg('5', 'assistant', 'teal teal teal from a subagent', { parentToolUseId: 't' })
+  ])
+  chat('c3', 'Teal paint', 50, 'p1', [msg('6', 'user', 'Which teal paint for the kitchen?'), msg('7', 'assistant', 'A muted teal works well with wood.')])
+
+  assert.deepEqual(terms('Router "wifi Channel" a'), ['router', 'wifi channel'], 'quoted phrases stay together, 1-letter words dropped')
+  assert.equal(chatText(st.loadHistory('c2')), 'My teal router keeps dropping wifi\n\nTry changing the wifi channel.', 'tool output and subagents are not searched')
+  const long = 'x'.repeat(200) + ' needle ' + 'y'.repeat(200)
+  assert.match(snippet(long, long, ['needle']), /^….*needle.*…$/)
+
+  const index = new ChatIndex(st, () => undefined)
+  const ids = (h: any[]) => h.map((x) => x.sessionId)
+  assert.deepEqual(ids(index.search('teal')), ['c3', 'c2'], 'title matches first')
+  assert.deepEqual(ids(index.search('teal wifi')), ['c2'], 'every word must match')
+  assert.deepEqual(ids(index.search('"wifi channel"')), ['c2']); assert.deepEqual(ids(index.search('"channel wifi"')), [])
+  assert.deepEqual(ids(index.search('well')), ['c1', 'c3'], 'same score: most recent first')
+  assert.deepEqual(ids(index.search('well', { projectId: 'p1' })), ['c3']); assert.deepEqual(ids(index.search('well', { projectId: null })), ['c1'])
+  assert.deepEqual(ids(index.search('teal', { excludeId: 'c3' })), ['c2'])
+  assert.equal(index.search('teal')[1].matches, 1); assert.match(index.search('peas')[0].snippet, /Peas and lettuce/)
+  assert.deepEqual(index.search(' a '), [], 'nothing to search for')
+  // cached until the chat changes
+  st.saveHistory('c1', [msg('8', 'user', 'tomatoes now')])
+  assert.deepEqual(ids(index.search('tomatoes')), [])
+  st.upsertSession({ ...st.getSession('c1'), updatedAt: 300 })
+  assert.deepEqual(ids(index.search('tomatoes')), ['c1'])
+  // open chats are searched from memory (fresher than disk)
+  const live = new ChatIndex(st, (id) => (id === 'c3' ? [msg('9', 'user', 'unsaved zebra')] : undefined))
+  assert.deepEqual(ids(live.search('zebra')), ['c3'])
+
+  // the tools Claude uses: scoped to the project, never the chat it's in
+  chat('c4', 'Big log', 10, 'p1', [msg('10', 'user', 'teal ' + 'z'.repeat(5000))])
+  const srv: any = createChatsServer({ index, store: st, sessionId: 'c2', projectId: 'p1' })
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  await srv.instance.connect(a)
+  const client = new Client({ name: 't', version: '1' })
+  await client.connect(b)
+  assert.deepEqual((await client.listTools()).tools.map((t) => t.name).sort(), ['read_chat', 'search_chats'])
+  const call = async (name: string, args: any) => (await client.callTool({ name, arguments: args })) as any
+  const text = (r: any) => r.content[0].text as string
+  const inProject = text(await call('search_chats', { query: 'teal' }))
+  assert.match(inProject, /^\[c3\] Teal paint · \d{4}-\d\d-\d\d\n {2}.*teal/); assert.match(inProject, /\[c4\] Big log/)
+  assert.ok(!inProject.includes('[c2]'), 'the current chat is left out')
+  assert.match(text(await call('search_chats', { query: 'peas' })), /No earlier chats match/, 'project scope by default')
+  assert.match(text(await call('search_chats', { query: 'tomatoes', scope: 'all' })), /\[c1\] Garden plans/)
+  const read = text(await call('read_chat', { id: 'c3' }))
+  assert.match(read, /Teal paint/); assert.match(read, /A muted teal works well with wood\./)
+  assert.match(text(await call('read_chat', { id: 'c4', max_chars: 1000 })), /more characters; ask with a larger max_chars/)
+  assert.ok((await call('read_chat', { id: 'c2' })).isError, 'not the chat it is in'); assert.ok((await call('read_chat', { id: 'nope' })).isError)
+  const step: any = { kind: 'tool', id: 's1', name: 'mcp__chats__search_chats', input: { query: 'teal router' }, done: true }
+  assert.equal(stepText(step).title, 'Searched your chats for “teal router”')
+  assert.equal(summarize([step, { ...step, id: 's2', name: 'mcp__chats__read_chat', input: { id: 'c3' } }]), 'Looked through past chats')
+  console.log('✓ chat search: terms, phrases, ranking, project scope, cache, live chats, search_chats/read_chat tools')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -524,6 +590,7 @@ projectPrompt()
 await memoryTool()
 exportAndImport()
 await reliabilityAndUx()
+await chatSearch()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

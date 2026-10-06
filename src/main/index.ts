@@ -179,6 +179,7 @@ function registerIpc(): void {
   })
   handle('shortcut:status', () => shortcutStatus)
   handle('usage:get', () => manager.usage())
+  handle('search:chats', (query: string) => manager.searchChats(query))
 
   // ---- sessions
   handle('sessions:list', () => store.listSessions())

@@ -5,6 +5,7 @@ import { api } from '../api'
 import { allStyles } from '../../../shared/styles'
 import { ArtifactPanel, type PanelState } from './ArtifactPanel'
 import { ChoiceDialog } from './ChoiceDialog'
+import { FindBar } from './FindBar'
 import { Icon } from './Icon'
 import { Menu, type MenuEntry } from './Menu'
 import { Turn, UserMessage, type TranscriptMode } from './MessageView'
@@ -97,6 +98,10 @@ export function ChatView(props: {
   onPin: (pinned: boolean) => void
   onDelete: () => void
   onExport: () => void
+  /** open the find bar (Ctrl+F, or from a search result) */
+  findRequest?: { query: string; n: number } | null
+  /** the find request was picked up (so it doesn't reopen in the next chat) */
+  onFindHandled?: () => void
 }) {
   const { meta, history, runtime } = props
   const [text, setText] = useState('')
@@ -110,6 +115,13 @@ export function ChatView(props: {
   const [renaming, setRenaming] = useState<string | null>(null)
   const [panel, setPanel] = useState<PanelState | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [find, setFind] = useState<{ query: string; n: number } | null>(null)
+  useEffect(() => {
+    if (!props.findRequest) return
+    setFind(props.findRequest)
+    props.onFindHandled?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.findRequest])
   const styleId = meta.style ?? props.settings.defaultStyle
   const currentStyle = !styleId || styleId === 'default' ? undefined : allStyles(props.settings.customStyles).find((s) => s.id === styleId)
   const [choice, setChoice] = useState<{ title: string; body: string; resolve: (v: 'undo' | 'keep' | null) => void } | null>(null)
@@ -400,7 +412,18 @@ export function ChatView(props: {
             if (paths.length) void addPaths(paths)
           }}
         >
-
+          {find && (
+            <FindBar
+              container={listRef}
+              initial={find.query}
+              refreshKey={history}
+              focusKey={find.n}
+              onClose={() => {
+                setFind(null)
+                taRef.current?.focus()
+              }}
+            />
+          )}
           <div
             className="messages"
             ref={listRef}

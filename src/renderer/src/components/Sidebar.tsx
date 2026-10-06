@@ -1,5 +1,6 @@
-import { useMemo, useState, type ReactNode } from 'react'
-import type { AuthStatus, Project, SessionMeta } from '../../../shared/types'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import type { AuthStatus, ChatSearchHit, Project, SessionMeta } from '../../../shared/types'
+import { api } from '../api'
 import type { SessionRuntime } from '../App'
 import { Icon } from './Icon'
 import { Menu, type MenuEntry } from './Menu'
@@ -35,6 +36,19 @@ function savePrefs(p: { collapsed: Record<string, boolean>; hideProjectChats: bo
   } catch {
     /* per-viewer convenience only */
   }
+}
+
+/** Mark the search words inside a snippet. */
+function highlight(text: string, query: string): ReactNode {
+  const words = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/"/g, ''))
+    .filter((w) => w.length >= 2)
+  if (!words.length) return text
+  const escaped = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, (c) => '\\' + c))
+  const re = new RegExp('(' + escaped.join('|') + ')', 'gi')
+  return text.split(re).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part))
 }
 
 /** A collapsible sidebar section, like the Claude app's Pinned / Today / Yesterday groups. */
@@ -76,6 +90,8 @@ export function Sidebar(props: {
   onRename: (id: string, title: string) => void
   onPin: (id: string, pinned: boolean) => void
   onExportChat: (id: string) => void
+  /** open a chat found by searching inside messages, with the find bar showing the query */
+  onOpenSearchHit: (id: string, query: string) => void
   projectsActive: boolean
   onProjects: () => void
   onOpenProject: (id: string) => void
@@ -89,6 +105,22 @@ export function Sidebar(props: {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [prefs, setPrefs] = useState(loadPrefs)
+  const [hits, setHits] = useState<ChatSearchHit[]>([])
+
+  // Full-text search inside messages, a moment after you stop typing.
+  useEffect(() => {
+    const q = filter.trim()
+    if (q.length < 2) {
+      setHits([])
+      return
+    }
+    let live = true
+    const t = setTimeout(() => void api.searchChats(q).then((h) => live && setHits(h)), 200)
+    return () => {
+      live = false
+      clearTimeout(t)
+    }
+  }, [filter])
 
   const update = (next: typeof prefs): void => {
     setPrefs(next)
@@ -118,6 +150,10 @@ export function Sidebar(props: {
     }
     return { pinnedChats, pinnedProjects, groups: out }
   }, [props.sessions, props.projects, filter, prefs.hideProjectChats])
+
+  // chats found only inside their messages (title matches are already listed above)
+  const shownIds = new Set([...pinnedChats.map((s) => s.id), ...groups.flatMap((g) => g[1].map((s) => s.id))])
+  const messageHits = searching ? hits.filter((h) => !shownIds.has(h.sessionId)) : []
 
   const name = props.auth.email ? props.auth.email.split('@')[0] : 'You'
   const plan = props.auth.subscriptionType ? cap(props.auth.subscriptionType) : ''
@@ -306,7 +342,17 @@ export function Sidebar(props: {
             {items.map(chatItem)}
           </Section>
         ))}
-        {searching && !groups.length && !pinnedCount && <div className="muted small pad">No chats match “{filter.trim()}”.</div>}
+        {searching && messageHits.length > 0 && (
+          <Section label="In messages" open count={messageHits.length} onToggle={() => {}}>
+            {messageHits.map((h) => (
+              <div key={h.sessionId} className={'session-item search-hit' + (h.sessionId === props.activeId ? ' active' : '')} onClick={() => props.onOpenSearchHit(h.sessionId, filter.trim())}>
+                <span className="hit-title">{h.title}</span>
+                <span className="hit-snippet">{highlight(h.snippet, filter)}</span>
+              </div>
+            ))}
+          </Section>
+        )}
+        {searching && !groups.length && !pinnedCount && !messageHits.length && <div className="muted small pad">No chats match “{filter.trim()}”.</div>}
         {!props.sessions.length && <div className="muted small pad">No chats yet.</div>}
         {prefs.hideProjectChats && !searching && (
           <button className="link-btn side-hint" onClick={() => update({ ...prefs, hideProjectChats: false })}>

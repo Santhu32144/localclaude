@@ -128,6 +128,8 @@ export default function App() {
   const [globalMemory, setGlobalMemory] = useState<MemoryItem[]>([])
   const [exportReq, setExportReq] = useState<{ scope: ExportScope; sessionId?: string; projectId?: string } | null>(null)
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null)
+  /** ask the open chat to show its find bar */
+  const [findRequest, setFindRequest] = useState<{ query: string; n: number } | null>(null)
   useEffect(() => {
     if (!toast) return
     const t = setTimeout(() => setToast(null), toast.error ? 9000 : 6000)
@@ -382,6 +384,9 @@ export default function App() {
       } else if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
         stepNav(e.key === 'ArrowLeft' ? -1 : 1)
+      } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'f' && page.kind === 'chat' && activeId) {
+        e.preventDefault()
+        setFindRequest({ query: window.getSelection()?.toString().trim().slice(0, 100) ?? '', n: Date.now() })
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 'e') {
         // export what's on screen: the chat, the project, or everything
         e.preventDefault()
@@ -455,6 +460,11 @@ export default function App() {
         onForward={() => stepNav(1)}
         onPin={(id, p) => void pinChat(id, p)}
         onExportChat={(id) => setExportReq({ scope: 'chat', sessionId: id })}
+        onOpenSearchHit={(id, query) => {
+          openChat(id)
+          setFindRequest({ query, n: Date.now() })
+          sidebar.close()
+        }}
         onOpenProject={(id) => {
           setPage({ kind: 'project', id })
           sidebar.close()
@@ -544,6 +554,8 @@ export default function App() {
             onPin={(p) => void pinChat(active.id, p)}
             onDelete={() => void deleteChat(active.id)}
             onExport={() => setExportReq({ scope: 'chat', sessionId: active.id })}
+            findRequest={findRequest}
+            onFindHandled={() => setFindRequest(null)}
           />
         ) : (
           <div className="empty-main">
