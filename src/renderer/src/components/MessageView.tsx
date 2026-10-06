@@ -2,9 +2,10 @@ import { memo, useState, type ReactNode } from 'react'
 import type { ArtifactType, ChatMessage } from '../../../shared/types'
 import { countChanges, type DiffLine } from '../../../shared/diff'
 import { ARTIFACT_LABEL } from '../../../shared/format'
-import { editDiff, fileName, isArtifactTool, parsedInput, plural, short, stepText, summarize, type Step, type ToolPart } from '../../../shared/steps'
+import { COMPUTER_TOOL, editDiff, fileName, isArtifactTool, parsedInput, plural, short, stepText, summarize, type Step, type ToolPart } from '../../../shared/steps'
 import { artifactIcon } from './ArtifactPanel'
 import { Icon } from './Icon'
+import { ImageStrip } from './Images'
 import { Markdown } from './Markdown'
 
 export type TranscriptMode = 'normal' | 'verbose'
@@ -134,6 +135,7 @@ function StepDetail({ step, childrenOf, mode }: { step: Step; childrenOf: (id: s
       )}
       {step.result !== undefined && step.isError && diff && <pre className="tool-pre result err">{result}</pre>}
       {step.result !== undefined && isAgent && <Markdown text={result} />}
+      {step.images && <ImageStrip images={step.images} size="small" />}
     </div>
   )
 }
@@ -175,6 +177,9 @@ function StepGroup({ steps, live, childrenOf, mode }: { steps: Step[]; live: boo
   const todo = [...tools].reverse().find((s) => s.name === 'TodoWrite' && Array.isArray(parsedInput(s).todos))
   const onlyThinking = !tools.length
   const thinkingText = steps.map((s) => (s.kind === 'thinking' ? s.text : '')).join('\n\n').trim()
+  // while Claude uses the computer, its latest screenshot shows under the steps
+  const screen = [...tools].reverse().find((s) => s.name === COMPUTER_TOOL && s.images?.length)?.images
+  const latestScreen = screen?.slice(-1)
 
   // A turn that only thought shows a simple "Thought process" toggle.
   if (onlyThinking) {
@@ -205,6 +210,7 @@ function StepGroup({ steps, live, childrenOf, mode }: { steps: Step[]; live: boo
           ))}
         </ul>
       )}
+      {!expanded && latestScreen && <ImageStrip images={latestScreen} size="small" className="screen-preview" />}
       {!expanded && edits.length > 0 && (
         <div className="file-cards">
           {edits.map((e) => (
@@ -377,14 +383,18 @@ export const UserMessage = memo(function UserMessage({
   const text = message.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')
   const [draft, setDraft] = useState<string | null>(null)
   const canEdit = !!onEdit && !!message.forkAt
+  const images = message.imageRefs ?? []
+  // a message can be only images; older chats only know how many there were
+  const canSend = draft !== null && (!!draft.trim() || images.length > 0)
   const save = (): void => {
-    if (draft === null || !draft.trim()) return
+    if (draft === null || !canSend) return
     onEdit?.(message.id, draft.trim())
     setDraft(null)
   }
   return (
     <div className="msg-user" data-msg={message.id}>
       <div className="user-col">
+        {images.length > 0 && <ImageStrip images={images} className="user-images" />}
         {draft !== null ? (
           <div className="bubble editing">
             <textarea
@@ -399,20 +409,24 @@ export const UserMessage = memo(function UserMessage({
               }}
             />
             <div className="row gap end">
-              <span className="muted small grow">{message.images ? 'Images aren’t sent again. ' : ''}Ctrl+Enter to send</span>
+              <span className="muted small grow">
+                {images.length ? 'The images are sent again. ' : message.images ? 'Images aren’t sent again. ' : ''}Ctrl+Enter to send
+              </span>
               <button className="btn ghost" onClick={() => setDraft(null)}>
                 Cancel
               </button>
-              <button className="btn primary" disabled={!draft.trim()} onClick={save}>
+              <button className="btn primary" disabled={!canSend} onClick={save}>
                 Send
               </button>
             </div>
           </div>
         ) : (
-          <div className="bubble">
-            {message.images ? <div className="muted small">📎 {plural(message.images, 'image')}</div> : null}
-            <div className="user-text">{text}</div>
-          </div>
+          (text.trim() || !images.length) && (
+            <div className="bubble">
+              {message.images && !images.length ? <div className="muted small">📎 {plural(message.images, 'image')}</div> : null}
+              <div className="user-text">{text}</div>
+            </div>
+          )
         )}
         {draft === null && (
           <div className="msg-actions">

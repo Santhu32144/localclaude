@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { AppSettings, Artifact, Attachment, ChatMessage, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, SessionMeta } from '../../../shared/types'
+import type { AppSettings, Artifact, Attachment, ChatMessage, ImageRef, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, SessionMeta } from '../../../shared/types'
 import type { SessionRuntime } from '../App'
 import { api } from '../api'
 import { allStyles } from '../../../shared/styles'
@@ -7,6 +7,7 @@ import { ArtifactPanel, type PanelState } from './ArtifactPanel'
 import { ChoiceDialog } from './ChoiceDialog'
 import { FindBar } from './FindBar'
 import { Icon } from './Icon'
+import { ImagesContext, Lightbox } from './Images'
 import { Menu, type MenuEntry } from './Menu'
 import { Turn, UserMessage, type TranscriptMode } from './MessageView'
 import { PermissionDialog } from './PermissionDialog'
@@ -116,6 +117,8 @@ export function ChatView(props: {
   const [panel, setPanel] = useState<PanelState | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [find, setFind] = useState<{ query: string; n: number } | null>(null)
+  const [lightbox, setLightbox] = useState<{ images: ImageRef[]; index: number } | null>(null)
+  const images = useMemo(() => ({ sessionId: meta.id, open: (list: ImageRef[], index: number) => setLightbox({ images: list, index }) }), [meta.id])
   useEffect(() => {
     if (!props.findRequest) return
     setFind(props.findRequest)
@@ -137,7 +140,7 @@ export function ChatView(props: {
    */
   const branchFrom = async (messageId: string, text: string): Promise<void> => {
     const msg = history.find((m) => m.id === messageId)
-    if (busy || !msg?.forkAt || !text.trim()) return
+    if (busy || !msg?.forkAt || (!text.trim() && !msg.imageRefs?.length)) return
     let code = false
     if (msg.uuid) {
       const p = await api.rewindPreview(meta.id, messageId)
@@ -158,7 +161,7 @@ export function ChatView(props: {
     const r = await api.rewind(meta.id, { messageId, code, conversation: true })
     if (!r.ok) return setNotice(r.error ?? 'Couldn’t go back to that message.')
     stick.current = true
-    await api.send({ sessionId: meta.id, text: text.trim(), attachments: [] })
+    await api.send({ sessionId: meta.id, text: text.trim(), attachments: [], reuseImages: msg.imageRefs })
   }
   // Open the side panel on an artifact as soon as Claude creates or updates it.
   useEffect(() => {
@@ -424,61 +427,64 @@ export function ChatView(props: {
               }}
             />
           )}
-          <div
-            className="messages"
-            ref={listRef}
-            onScroll={(e) => {
-              const el = e.currentTarget
-              const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-              stick.current = bottom
-              if (bottom !== atBottom) setAtBottom(bottom)
-            }}
-          >
-            <div className="messages-inner">
-              {top.length === 0 && (
-                <div className="chat-empty">
-                  <Spark size={40} className="welcome-spark" />
-                  <h2>How can I help you today?</h2>
-                  <p className="muted small">
-                    Working in <code>{baseName(meta.cwd)}</code> · <code>/</code> commands · <code>@</code> files · <code>Shift+Tab</code> modes
-                    {props.settings.computerUse ? ' · computer use on' : ''}
-                  </p>
-                </div>
-              )}
-              {segments.map((seg, i) => {
-                if (seg.kind === 'user')
+          <ImagesContext.Provider value={images}>
+            <div
+              className="messages"
+              ref={listRef}
+              onScroll={(e) => {
+                const el = e.currentTarget
+                const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+                stick.current = bottom
+                if (bottom !== atBottom) setAtBottom(bottom)
+              }}
+            >
+              <div className="messages-inner">
+                {top.length === 0 && (
+                  <div className="chat-empty">
+                    <Spark size={40} className="welcome-spark" />
+                    <h2>How can I help you today?</h2>
+                    <p className="muted small">
+                      Working in <code>{baseName(meta.cwd)}</code> · <code>/</code> commands · <code>@</code> files · <code>Shift+Tab</code> modes
+                      {props.settings.computerUse ? ' · computer use on' : ''}
+                    </p>
+                  </div>
+                )}
+                {segments.map((seg, i) => {
+                  if (seg.kind === 'user')
+                    return (
+                      <UserMessage
+                        key={seg.message.id}
+                        message={seg.message}
+                        onRewind={busy ? undefined : (id) => setRewind({ messageId: id })}
+                        onEdit={busy ? undefined : (id, text) => void branchFrom(id, text)}
+                      />
+                    )
+                  const isLast = i === segments.length - 1
+                  const prev = segments[i - 1]
+                  const retryFrom = isLast && !busy && prev?.kind === 'user' && prev.message.forkAt ? prev.message : undefined
                   return (
-                    <UserMessage
-                      key={seg.message.id}
-                      message={seg.message}
-                      onRewind={busy ? undefined : (id) => setRewind({ messageId: id })}
-                      onEdit={busy ? undefined : (id, text) => void branchFrom(id, text)}
+                    <Turn
+                      key={seg.key}
+                      messages={seg.messages}
+                      childrenOf={childrenOf}
+                      live={busy && isLast}
+                      mode={props.transcript}
+                      artifactInfo={artifactInfo}
+                      onOpenArtifact={(id) => setPanel({ id, version: null })}
+                      onRetry={retryFrom ? () => void branchFrom(retryFrom.id, retryFrom.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')) : undefined}
+                      footer={busy && isLast && !props.permission ? <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} /> : undefined}
                     />
                   )
-                const isLast = i === segments.length - 1
-                const prev = segments[i - 1]
-                const retryFrom = isLast && !busy && prev?.kind === 'user' && prev.message.forkAt ? prev.message : undefined
-                return (
-                  <Turn
-                    key={seg.key}
-                    messages={seg.messages}
-                    childrenOf={childrenOf}
-                    live={busy && isLast}
-                    mode={props.transcript}
-                    artifactInfo={artifactInfo}
-                    onOpenArtifact={(id) => setPanel({ id, version: null })}
-                    onRetry={retryFrom ? () => void branchFrom(retryFrom.id, retryFrom.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')) : undefined}
-                    footer={busy && isLast && !props.permission ? <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} /> : undefined}
-                  />
-                )
-              })}
-              {busy && !props.permission && segments[segments.length - 1]?.kind !== 'turn' && (
-                <div className="turn">
-                  <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} />
-                </div>
-              )}
+                })}
+                {busy && !props.permission && segments[segments.length - 1]?.kind !== 'turn' && (
+                  <div className="turn">
+                    <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} />
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+          </ImagesContext.Provider>
+          {lightbox && <Lightbox sessionId={meta.id} images={lightbox.images} index={lightbox.index} onClose={() => setLightbox(null)} />}
 
           <div className="composer-wrap">
             {!atBottom && (

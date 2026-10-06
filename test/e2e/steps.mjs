@@ -220,5 +220,62 @@ export const steps = [
       if (!reply.includes('Looked through past chats')) throw new Error('the step summary should say what Claude did, got: ' + reply)
       await c.shot('claude-searched-chats')
     }
+  },
+  {
+    name: 'paste an image: Claude gets it and it shows in the chat',
+    run: async (c) => {
+      await c.page("__t.click(__t.q('.side-new'))")
+      await c.waitFor('empty chat', "!__t.q('.msg-user') && !!__t.q('.composer-input')")
+      await c.page(`(async () => {
+        const cv = document.createElement('canvas'); cv.width = 320; cv.height = 200
+        const g = cv.getContext('2d'); g.fillStyle = '#d97757'; g.fillRect(0, 0, 320, 200); g.fillStyle = '#fff'; g.fillRect(40, 40, 120, 80)
+        const blob = await new Promise((r) => cv.toBlob(r, 'image/png'))
+        const dt = new DataTransfer(); dt.items.add(new File([blob], 'square.png', { type: 'image/png' }))
+        __t.q('.composer-input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+        return true
+      })()`)
+      await c.waitFor('attachment preview', "!!__t.q('.attachments img')")
+      await c.send('what is in this picture', 'Echo: what is in this picture (with 1 image)')
+      await c.waitFor('thumbnail loaded', "(() => { const i = __t.q('.msg-user .user-images img'); return !!i && i.complete && i.naturalWidth === 320 })()")
+      if (await c.page("!!__t.q('.attachments img')")) throw new Error('the composer should be empty after sending')
+    }
+  },
+  {
+    name: 'open an image full size and close it with Esc',
+    run: async (c) => {
+      await c.page("__t.click(__t.q('.msg-user .user-images .thumb'))")
+      await c.waitFor('viewer', "(() => { const i = __t.q('.lightbox-img'); return !!i && i.complete && i.naturalWidth === 320 })()")
+      if (!(await c.page("__t.text('.lightbox-bar').includes('320 × 200')"))) throw new Error('the viewer should show the size')
+      await c.shot('lightbox')
+      await c.page("__t.key(window, 'Escape')")
+      await c.waitFor('viewer closed', "!__t.q('.lightbox')")
+      await c.sleep(200)
+      if (await c.page("!!__t.q('.rewind-card')")) throw new Error('Esc should only close the viewer')
+    }
+  },
+  {
+    name: 'editing a message sends its image again',
+    run: async (c) => {
+      await c.page(`__t.click(__t.q('.msg-user .msg-actions button[title="Edit and resend"]'))`)
+      await c.waitFor('editor', "!!__t.q('.edit-input') && __t.text('.bubble.editing').includes('The images are sent again')")
+      await c.page("__t.setValue(__t.q('.edit-input'), 'describe it again')")
+      await c.page("__t.click(__t.byText('.bubble.editing .btn', 'Send'))")
+      await c.waitFor('reply about the image', "__t.qa('.turn').some((t) => t.innerText.includes('Echo: describe it again (with 1 image)')) && !__t.q('.send.stop')", 15000)
+      await c.waitFor('thumbnail still there', "(() => { const i = __t.q('.msg-user .user-images img'); return !!i && i.complete && i.naturalWidth === 320 })()")
+    }
+  },
+  {
+    name: 'a computer-use screenshot shows under the steps',
+    run: async (c) => {
+      await c.send('take a screenshot', 'Here is your screen.')
+      await c.waitFor('screenshot preview', "(() => { const i = __t.q('.turn .screen-preview img'); return !!i && i.complete && i.naturalWidth > 0 })()")
+      const w = await c.page("__t.q('.turn .screen-preview img').naturalWidth")
+      if (w !== 480) throw new Error('expected the 480px thumbnail, got ' + w)
+      await c.shot('screenshot-step')
+      await c.page("__t.click(__t.q('.turn .screen-preview .thumb'))")
+      await c.waitFor('full size in the viewer', "(() => { const i = __t.q('.lightbox-img'); return !!i && i.complete && i.naturalWidth === 640 })()")
+      await c.page("__t.click(__t.q('.lightbox'))")
+      await c.waitFor('closed by clicking outside', "!__t.q('.lightbox')")
+    }
   }
 ]

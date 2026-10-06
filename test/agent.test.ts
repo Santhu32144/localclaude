@@ -3,10 +3,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { PROJECT_KNOWLEDGE_LIMIT, SessionManager, systemAppend } from '../src/main/agent'
 import { ARTIFACT_TOOLS, createArtifactServer, renderArtifactPage } from '../src/main/artifacts'
-import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup } from '../src/main/exporter'
+import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup, readBackup } from '../src/main/exporter'
 import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
 import { createZip, readZip } from '../src/main/zip'
 import { CHAT_TOOLS, ChatIndex, chatText, createChatsServer, snippet, terms } from '../src/main/chatSearch'
+import { imageSize, referencedImages, resultImages, sniffImageType, storeImage } from '../src/main/images'
 import { contextMenuTemplate } from '../src/main/contextMenu'
 import { notificationFor } from '../src/main/notify'
 import { cleanTitle } from '../src/main/titles'
@@ -21,12 +22,16 @@ import { DEFAULT_EXPORT_OPTIONS } from '../src/shared/types'
 import type { AgentEvent, ChatMessage, SessionMeta, AppSettings } from '../src/shared/types'
 import { DEFAULT_SETTINGS } from '../src/shared/types'
 import { applyEvent } from '../src/shared/reducer'
-import { stepText, summarize } from '../src/shared/steps'
+import { COMPUTER_TOOL, stepText, summarize } from '../src/shared/steps'
 import { countChanges, diffStrings, linesFromPatch } from '../src/shared/diff'
 import assert from 'node:assert/strict'
 
 const sessions: SessionMeta[] = []
+const savedImages = new Map<string, Buffer>()
 const store: any = {
+  saveImage: (sid: string, id: string, data: Buffer) => savedImages.set(`${sid}/${id}`, data),
+  loadImage: (sid: string, id: string) => savedImages.get(`${sid}/${id}`) ?? null,
+  pruneImages: () => 0,
   getSettings: (): AppSettings => ({ ...DEFAULT_SETTINGS, defaultCwd: process.cwd(), loadUserSettings: false, loadProjectSettings: false }),
   getSession: (id: string) => sessions.find((s) => s.id === id),
   upsertSession: (m: SessionMeta) => { const i = sessions.findIndex((s) => s.id === m.id); i >= 0 ? (sessions[i] = m) : sessions.push(m) },
@@ -245,7 +250,7 @@ function projectPrompt() {
 
 /** In-memory stand-in for SecureStore, enough for memory/export/import. */
 function memStore() {
-  const s = { sessions: [] as SessionMeta[], projects: [] as any[], memory: [] as any[], hist: {} as any, arts: {} as any, files: {} as any }
+  const s = { sessions: [] as SessionMeta[], projects: [] as any[], memory: [] as any[], hist: {} as any, arts: {} as any, files: {} as any, images: new Map<string, Buffer>() }
   const upsert = (list: any[], x: any) => {
     const i = list.findIndex((y) => y.id === x.id)
     i >= 0 ? (list[i] = x) : list.push(x)
@@ -266,7 +271,18 @@ function memStore() {
     loadProjectFiles: (id: string) => s.files[id] ?? {},
     saveProjectFiles: (id: string, f: any) => (s.files[id] = f),
     getGlobalMemory: () => s.memory,
-    setGlobalMemory: (m: any[]) => (s.memory = m)
+    setGlobalMemory: (m: any[]) => (s.memory = m),
+    saveImage: (sid: string, id: string, data: Buffer) => s.images.set(`${sid}/${id}`, data),
+    loadImage: (sid: string, id: string) => s.images.get(`${sid}/${id}`) ?? null,
+    pruneImages: (sid: string, keep: Set<string>) => {
+      let n = 0
+      for (const k of [...s.images.keys()])
+        if (k.startsWith(sid + '/') && !keep.has(k.slice(sid.length + 1))) {
+          s.images.delete(k)
+          n++
+        }
+      return n
+    }
   }
 }
 
@@ -550,6 +566,93 @@ async function chatSearch() {
   console.log('✓ chat search: terms, phrases, ranking, project scope, cache, live chats, search_chats/read_chat tools')
 }
 
+/** The start of a PNG: enough for type and size checks (and for storing). */
+function png(w: number, h: number): Buffer {
+  const b = Buffer.alloc(33)
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b)
+  b.writeUInt32BE(13, 8)
+  b.write('IHDR', 12, 'ascii')
+  b.writeUInt32BE(w, 16)
+  b.writeUInt32BE(h, 20)
+  return b
+}
+
+async function imagesInChats() {
+  // --- what an image is and how big, from its header
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x32, 0x00, 0x64, 0x03, 0, 0, 0, 0, 0, 0, 0, 0])
+  const gif = Buffer.concat([Buffer.from('GIF89a'), Buffer.from([0x40, 0x01, 0xc8, 0x00])])
+  const webp = Buffer.alloc(30)
+  webp.write('RIFF', 0, 'ascii'); webp.write('WEBP', 8, 'ascii'); webp.write('VP8X', 12, 'ascii'); webp.writeUIntLE(799, 24, 3); webp.writeUIntLE(599, 27, 3)
+  assert.deepEqual([png(1, 1), jpeg, gif, webp, Buffer.from('hello world!')].map((b) => sniffImageType(b)), ['image/png', 'image/jpeg', 'image/gif', 'image/webp', null])
+  assert.deepEqual(imageSize(png(1280, 800)), { width: 1280, height: 800 })
+  assert.deepEqual(imageSize(jpeg), { width: 100, height: 50 }); assert.deepEqual(imageSize(gif), { width: 320, height: 200 }); assert.deepEqual(imageSize(webp), { width: 800, height: 600 })
+  assert.equal(imageSize(Buffer.from([0xff, 0xd8, 0xff])), undefined, 'truncated')
+  // tool results carry images as API blocks or MCP blocks
+  const b64 = png(2, 2).toString('base64')
+  assert.equal(resultImages([{ type: 'text', text: 'x' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } }, { type: 'image', data: b64, mimeType: 'image/png' }]).length, 2)
+  assert.deepEqual(resultImages('just text'), [])
+  const kept: any = { saveImage: () => {} }
+  assert.equal(storeImage(kept, 'c', Buffer.from('not an image')), null)
+  assert.deepEqual({ ...storeImage(kept, 'c', png(64, 32)), id: 'x' }, { id: 'x', mediaType: 'image/png', width: 64, height: 32 })
+
+  // --- a chat: attach an image, a tool returns a screenshot, an edit sends the image again
+  const meta = mgr.create(process.cwd())
+  const s: any = (mgr as any).get(meta.id)
+  const sent: any[] = []
+  s.ensureStarted = () => { s.queue ??= { push: (m: any) => sent.push(m), close() {} } }
+  const pic = png(64, 32)
+  mgr.send({ sessionId: meta.id, text: 'what is this?', attachments: [{ kind: 'image', mediaType: 'image/png', base64: pic.toString('base64'), name: 'x.png' }] })
+  const user = s.history.at(-1)
+  assert.equal(user.images, 1); assert.deepEqual(user.imageRefs.map((r: any) => [r.mediaType, r.width, r.height]), [['image/png', 64, 32]])
+  assert.deepEqual(sent[0].message.content.map((c: any) => c.type), ['image', 'text'])
+  assert.ok(savedImages.get(`${meta.id}/${user.imageRefs[0].id}`)?.equals(pic), 'saved with the chat')
+  mgr.send({ sessionId: meta.id, text: 'and this', attachments: [{ kind: 'image', mediaType: 'image/png', base64: Buffer.from('nope').toString('base64'), name: 'y.png' }] })
+  assert.equal(s.history.at(-1).imageRefs, undefined, 'not an image: not kept'); assert.equal(sent[1].message.content.length, 1, 'and not sent')
+  s.handle({ type: 'assistant', parent_tool_use_id: null, message: { id: 'shot-msg', content: [{ type: 'tool_use', id: 'shot1', name: COMPUTER_TOOL, input: { action: 'screenshot' } }] } })
+  s.handle({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'shot1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png(1280, 800).toString('base64') } }] }] } })
+  const shot = s.history.find((m: any) => m.id === 'a-shot-msg').parts[0]
+  assert.equal(shot.images.length, 1); assert.equal(shot.images[0].width, 1280); assert.equal(shot.result, '[image]')
+  assert.deepEqual(rendererView.find((m) => m.id === 'a-shot-msg'), s.history.find((m: any) => m.id === 'a-shot-msg'), 'the window sees the screenshot too')
+  // a replayed result (or a second final message) doesn't drop the images
+  s.handle({ type: 'assistant', parent_tool_use_id: null, message: { id: 'shot-msg', content: [{ type: 'tool_use', id: 'shot1', name: COMPUTER_TOOL, input: { action: 'screenshot' } }] } })
+  assert.equal(s.history.find((m: any) => m.id === 'a-shot-msg').parts[0].images.length, 1)
+  mgr.send({ sessionId: meta.id, text: 'look again', attachments: [], reuseImages: user.imageRefs })
+  assert.equal(sent.at(-1).message.content[0].source.data, pic.toString('base64')); assert.deepEqual(s.history.at(-1).imageRefs, user.imageRefs)
+  assert.equal(referencedImages(s.history).length, 3)
+
+  // --- opening a chat clears out images nothing points to any more (after rewinds and edits)
+  const st: any = memStore()
+  const keep = { id: '0b5f1f8e-1111-4222-8333-944455556666', mediaType: 'image/png', width: 64, height: 32 }
+  const screen = { id: '0b5f1f8e-1111-4222-8333-944455557777', mediaType: 'image/png' }
+  st.upsertSession({ id: 'ci', title: 'Pictures', cwd: 'C:\\x', createdAt: 1, updatedAt: 2 })
+  const history = [
+    { id: 'u', role: 'user', ts: 1, parts: [{ kind: 'text', text: 'see' }], images: 1, imageRefs: [keep] },
+    { id: 'a', role: 'assistant', ts: 2, parts: [{ kind: 'tool', toolUseId: 't', name: COMPUTER_TOOL, input: { action: 'screenshot' }, result: '[image]', done: true, images: [screen] }, { kind: 'text', text: 'ok' }] }
+  ]
+  st.saveHistory('ci', history)
+  st.saveImage('ci', keep.id, png(64, 32)); st.saveImage('ci', screen.id, png(10, 10)); st.saveImage('ci', 'gone', png(5, 5))
+  ;(new SessionManager(st, () => {}, { transcriptExists: () => true }) as any).get('ci')
+  assert.deepEqual([...st._s.images.keys()].sort(), [`ci/${keep.id}`, `ci/${screen.id}`])
+
+  // --- exports carry the images; a backup brings them back
+  const one = chatMarkdown(st.getSession('ci'), history as any, DEFAULT_EXPORT_OPTIONS)
+  assert.match(one, /_\(1 image attached\)_/, 'a single Markdown file has nowhere to put images')
+  const built = buildFullExport(st, DEFAULT_EXPORT_OPTIONS)
+  const names = built.entries.map((e) => e.name)
+  assert.ok(names.includes(`${built.name}/images/${keep.id}.png`)); assert.ok(names.includes(`${built.name}/images/${screen.id}.png`), 'screenshots go in for the backup')
+  const md = String(built.entries.find((e) => e.name.endsWith('Pictures.md'))!.data)
+  assert.ok(md.includes(`![image](<../images/${keep.id}.png>)`), 'your image shows in the chat')
+  const fullMd = buildFullExport(st, { ...DEFAULT_EXPORT_OPTIONS, tools: 'full', backup: false })
+  assert.ok(String(fullMd.entries.find((e) => e.name.endsWith('Pictures.md'))!.data).includes(`![screenshot](<../images/${screen.id}.png>)`))
+  assert.ok(!buildFullExport(st, { ...DEFAULT_EXPORT_OPTIONS, backup: false }).entries.some((e) => e.name.endsWith(`${screen.id}.png`)), 'no backup, summary steps: no screenshots')
+  const { backup, images } = readBackup(createZip(built.entries))
+  assert.equal(images.size, 2)
+  const fresh: any = memStore()
+  importBackup(fresh, backup, new Set(), images)
+  assert.ok(fresh.loadImage('ci', keep.id)?.equals(png(64, 32))); assert.ok(fresh.loadImage('ci', screen.id))
+  console.log('✓ images: types and sizes, attach, screenshots, resend on edit, pruning, exports and backups')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -591,6 +694,7 @@ await memoryTool()
 exportAndImport()
 await reliabilityAndUx()
 await chatSearch()
+await imagesInChats()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

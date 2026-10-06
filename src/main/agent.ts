@@ -10,6 +10,7 @@ import type {
   ChatSearchHit,
   ContentPart,
   DiffHunk,
+  ImageRef,
   McpStatus,
   MemoryItem,
   PlanUsage,
@@ -26,6 +27,7 @@ import { resolveClaudeBinary, subscriptionEnv } from './claude'
 import { ARTIFACT_TOOLS, createArtifactServer } from './artifacts'
 import { CHAT_TOOLS, ChatIndex, createChatsServer } from './chatSearch'
 import { createComputerServer } from './computer'
+import { referencedImages, resultImages, storeImage } from './images'
 import { query } from './sdk'
 import { importedContext } from './exporter'
 import { PROJECT_KNOWLEDGE_LIMIT_CHARS } from './limits'
@@ -110,6 +112,8 @@ class AgentSession {
     private deps: SessionDeps
   ) {
     this.history = store.loadHistory(meta.id)
+    // images left behind by rewinds and edits
+    if (this.history.length) store.pruneImages(meta.id, new Set(referencedImages(this.history).map((r) => r.id)))
   }
 
   private emit(e: AgentEvent): void {
@@ -298,11 +302,19 @@ class AgentSession {
   send(p: SendPayload): void {
     if (!this.q && this.meta.sdkSessionId && !this.deps.transcriptExists(this.meta.sdkSessionId, this.meta.cwd)) this.recoverMissingTranscript()
     const content: SDKUserMessage['message']['content'] = []
+    const images: ImageRef[] = []
+    const addImage = (ref: ImageRef, base64: string): void => {
+      images.push(ref)
+      content.push({ type: 'image', source: { type: 'base64', media_type: ref.mediaType as 'image/png', data: base64 } })
+    }
+    // an edited or retried message sends its images again
+    for (const r of p.reuseImages ?? []) {
+      const data = this.store.loadImage(this.meta.id, r.id)
+      if (data) addImage(r, data.toString('base64'))
+    }
     for (const a of p.attachments) {
-      content.push({
-        type: 'image',
-        source: { type: 'base64', media_type: a.mediaType as 'image/png', data: a.base64 }
-      })
+      const ref = storeImage(this.store, this.meta.id, Buffer.from(a.base64, 'base64'))
+      if (ref) addImage(ref, a.base64)
     }
     if (p.text.trim()) content.push({ type: 'text', text: p.text })
     if (!content.length) return
@@ -314,7 +326,8 @@ class AgentSession {
       id: 'u-' + uuid,
       role: 'user',
       parts: [{ kind: 'text', text: p.text }],
-      images: p.attachments.length || undefined,
+      images: images.length || undefined,
+      imageRefs: images.length ? images : undefined,
       ts: Date.now(),
       uuid,
       // Unknown for chats that predate rewind support: conversation rewind is then unavailable for this message.
@@ -740,19 +753,23 @@ class AgentSession {
 
       case 'user': {
         const uuid = (msg as { uuid?: string }).uuid
-        if (!msg.parent_tool_use_id && uuid && !(msg as { isReplay?: boolean }).isReplay) this.lastEntry = uuid
+        const replay = !!(msg as { isReplay?: boolean }).isReplay
+        if (!msg.parent_tool_use_id && uuid && !replay) this.lastEntry = uuid
         const content = msg.message.content
         if (!Array.isArray(content)) return
         const patch = structuredPatch(msg.tool_use_result)
         for (const b of content as unknown as Record<string, unknown>[]) {
           if (b.type === 'tool_result') {
+            // screenshots and image files Claude read are kept with the chat
+            const images = replay ? [] : resultImages(b.content).flatMap((d) => storeImage(this.store, sid, d) ?? [])
             this.emit({
               type: 'tool-result',
               sessionId: sid,
               toolUseId: String(b.tool_use_id),
               result: toolResultToText(b.content),
               isError: !!b.is_error,
-              patch
+              patch,
+              images: images.length ? images : undefined
             })
           }
         }

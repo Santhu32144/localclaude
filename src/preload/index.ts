@@ -106,6 +106,8 @@ const api = {
 
   usage: () => inv<PlanUsage>('usage:get'),
   searchChats: (query: string) => inv<ChatSearchHit[]>('search:chats', query),
+  copyImage: (sessionId: string, id: string) => inv<boolean>('image:copy', sessionId, id),
+  saveImage: (sessionId: string, id: string) => inv<{ ok: boolean; path?: string }>('image:save', sessionId, id),
   setStyle: (id: string, style: string) => inv<void>('chat:setStyle', id, style),
   shortcutStatus: () => inv<{ accelerator: string; ok: boolean }>('shortcut:status'),
   /** a notification was clicked: show that chat */

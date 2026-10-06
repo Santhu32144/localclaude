@@ -3,6 +3,7 @@
 // (artifacts, memory, chat search, knowledge) for real, and asks for permissions through canUseTool.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { nativeImage } from 'electron'
 import { randomUUID } from 'node:crypto'
 
 type Msg = Record<string, unknown>
@@ -39,6 +40,27 @@ class Channel<T> {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+function imageCount(m: UserMsg): number {
+  const c = m.message.content
+  return Array.isArray(c) ? c.filter((b) => b.type === 'image').length : 0
+}
+
+/** A 640x400 gradient PNG standing in for a screenshot. */
+function fakeScreenshot(): string {
+  const w = 640
+  const h = 400
+  const px = Buffer.alloc(w * h * 4)
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4
+      px[i] = Math.round(120 + (x * 100) / w)
+      px[i + 1] = Math.round(90 + (y * 80) / h)
+      px[i + 2] = 200
+      px[i + 3] = 255
+    }
+  return nativeImage.createFromBitmap(px, { width: w, height: h }).toPNG().toString('base64')
+}
+
 function lastText(m: UserMsg): string {
   const c = m.message.content
   if (typeof c === 'string') return c
@@ -69,7 +91,7 @@ export function fakeQuery({ prompt, options = {} }: { prompt: string | AsyncIter
   }
 
   /** One assistant turn: optional tool calls, then streamed text, then a result. */
-  const turn = async (text: string): Promise<void> => {
+  const turn = async (text: string, images = 0): Promise<void> => {
     interrupted = false
     const t = text.toLowerCase()
     const callTool = async (name: string, input: Record<string, unknown>, run: () => Promise<{ text: string; isError: boolean }>, extra?: Msg): Promise<void> => {
@@ -84,7 +106,7 @@ export function fakeQuery({ prompt, options = {} }: { prompt: string | AsyncIter
         ...extra
       })
     }
-    let reply = `Echo: ${text}`
+    let reply = `Echo: ${text}` + (images ? ` (with ${images} image${images === 1 ? '' : 's'})` : '')
     if (t.includes('make artifact')) {
       await callTool('mcp__artifacts__create_artifact', { id: 'demo-page', type: 'html', title: 'Demo page', content: '<h1>Hello from the demo</h1>' }, () =>
         tool('artifacts', 'create_artifact', { id: 'demo-page', type: 'html', title: 'Demo page', content: '<h1>Hello from the demo</h1>' })
@@ -126,6 +148,12 @@ export function fakeQuery({ prompt, options = {} }: { prompt: string | AsyncIter
         return r
       })
       reply = `Knowledge: ${found.slice(0, 200)}`
+    } else if (t.includes('take a screenshot')) {
+      const id = 'toolu_' + randomUUID().slice(0, 8)
+      out.push({ type: 'assistant', uuid: randomUUID(), parent_tool_use_id: null, message: { id: 'msg_' + randomUUID().slice(0, 8), content: [{ type: 'tool_use', id, name: 'mcp__computer-use__computer', input: { action: 'screenshot' } }] } })
+      const shot = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: fakeScreenshot() } }
+      out.push({ type: 'user', uuid: randomUUID(), parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: [shot] }] } })
+      reply = 'Here is your screen.'
     } else if (t.includes('slow')) {
       for (let i = 0; i < 30 && !interrupted; i++) await sleep(100)
     }
@@ -164,7 +192,7 @@ export function fakeQuery({ prompt, options = {} }: { prompt: string | AsyncIter
       claude_code_version: 'fake',
       permissionMode: options.permissionMode ?? 'default'
     })
-    for await (const m of prompt) await turn(lastText(m))
+    for await (const m of prompt) await turn(lastText(m), imageCount(m))
     out.end()
   })()
 

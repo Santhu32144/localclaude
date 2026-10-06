@@ -57,7 +57,7 @@ export function applyEvent(history: ChatMessage[], e: AgentEvent): ChatMessage[]
         if (p.kind !== 'tool') return p
         const prev = old.parts.find((q) => q.kind === 'tool' && q.toolUseId === p.toolUseId)
         return prev && prev.kind === 'tool' && prev.result !== undefined
-          ? { ...p, result: prev.result, isError: prev.isError, patch: prev.patch, done: true }
+          ? { ...p, result: prev.result, isError: prev.isError, patch: prev.patch, images: prev.images, done: true }
           : p
       })
       const next = history.slice()
@@ -72,7 +72,7 @@ export function applyEvent(history: ChatMessage[], e: AgentEvent): ChatMessage[]
         if (pi >= 0) {
           const next = history.slice()
           const parts = m.parts.slice()
-          parts[pi] = { ...(parts[pi] as Extract<ContentPart, { kind: 'tool' }>), result: e.result, isError: e.isError, patch: e.patch, done: true }
+          parts[pi] = { ...(parts[pi] as Extract<ContentPart, { kind: 'tool' }>), result: e.result, isError: e.isError, patch: e.patch, done: true, ...(e.images && { images: e.images }) }
           next[i] = { ...m, parts }
           return next
         }

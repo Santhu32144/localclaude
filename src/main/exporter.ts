@@ -1,10 +1,11 @@
 // Export chats, projects and everything else to Markdown (single chat) or a ZIP of
-// Markdown files plus artifacts, knowledge files and memory. A backup JSON inside the
-// ZIP lets you import it back into LocalClaude, on this machine or another one.
+// Markdown files plus artifacts, images, knowledge files and memory. A backup JSON inside
+// the ZIP lets you import it back into LocalClaude, on this machine or another one.
 import { ARTIFACT_LABEL, artifactExt, artifactLang, estimateTokens, fenced, safeFileName } from '../shared/format'
 import { editDiff, isArtifactTool, parsedInput, plural, short, stepText, summarize, type Step, type ToolPart } from '../shared/steps'
-import type { Artifact, ChatMessage, ExportOptions, ImportResult, MemoryItem, Project, ProjectContextUsage, SessionMeta } from '../shared/types'
+import type { Artifact, ChatMessage, ExportOptions, ImageRef, ImportResult, MemoryItem, Project, ProjectContextUsage, SessionMeta } from '../shared/types'
 import { renderArtifactPage } from './artifacts'
+import { IMAGE_EXT, referencedImages } from './images'
 import { PROJECT_KNOWLEDGE_LIMIT_CHARS } from './limits'
 import type { SecureStore } from './store'
 import { transcriptIds } from './transcripts'
@@ -20,6 +21,7 @@ type Store = Pick<
   | 'getProject'
   | 'loadProjectFiles'
   | 'getGlobalMemory'
+  | 'loadImage'
 >
 
 const pad = (n: number): string => String(n).padStart(2, '0')
@@ -49,13 +51,22 @@ interface ChatContext {
   artifacts?: Artifact[]
   /** when set, artifacts live in separate files and the chat links to them instead of embedding them */
   artifactLink?: (a: Artifact) => string | undefined
+  /** when set (in a ZIP), images are files next to the chat and shown inline */
+  imageLink?: (img: ImageRef) => string | undefined
+}
+
+/** Images as Markdown, or null when they can't be linked (a single .md file has nowhere to put them). */
+function imagesMarkdown(images: ImageRef[], ctx: ChatContext, alt: string): string | null {
+  if (!ctx.imageLink) return null
+  const links = images.map((img) => ctx.imageLink!(img)).filter((x): x is string => !!x)
+  return links.length ? links.map((l) => `![${alt}](<${l}>)`).join('\n') : null
 }
 
 function details(summary: string, body: string): string {
   return `<details>\n<summary>${escHtml(summary)}</summary>\n\n${body.trim()}\n\n</details>`
 }
 
-function stepBody(step: ToolPart, byParent: Map<string, ChatMessage[]>, opts: ExportOptions): string {
+function stepBody(step: ToolPart, byParent: Map<string, ChatMessage[]>, opts: ExportOptions, ctx: ChatContext): string {
   const input = parsedInput(step)
   const result = stripAnsi(step.result ?? '')
   const out: string[] = []
@@ -88,11 +99,13 @@ function stepBody(step: ToolPart, byParent: Map<string, ChatMessage[]>, opts: Ex
       if (Object.keys(input).length) out.push(fenced(JSON.stringify(input, null, 2), 'json'))
       if (result.trim()) out.push(fenced(clip(result), 'text'))
   }
+  const shots = step.images?.length ? imagesMarkdown(step.images, ctx, 'screenshot') : null
+  if (shots) out.push(shots)
   if (opts.tools === 'full' && step.isError && !out.length) out.push(fenced(clip(result), 'text'))
   return out.join('\n\n')
 }
 
-function stepsMarkdown(steps: Step[], opts: ExportOptions, byParent: Map<string, ChatMessage[]>): string {
+function stepsMarkdown(steps: Step[], opts: ExportOptions, byParent: Map<string, ChatMessage[]>, ctx: ChatContext): string {
   const out: string[] = []
   const tools = steps.filter((s): s is ToolPart => s.kind === 'tool')
   if (opts.thinking) {
@@ -107,7 +120,7 @@ function stepsMarkdown(steps: Step[], opts: ExportOptions, byParent: Map<string,
     const failed = tools.filter((t) => t.isError).length
     out.push(`> _${summarize(tools)}${failed ? ` · ${plural(failed, 'step')} failed` : ''}_`)
   } else {
-    for (const t of tools) out.push(details(stepText(t).title + (t.isError ? ' (failed)' : ''), stepBody(t, byParent, opts) || '_(no details)_'))
+    for (const t of tools) out.push(details(stepText(t).title + (t.isError ? ' (failed)' : ''), stepBody(t, byParent, opts, ctx) || '_(no details)_'))
   }
   return out.join('\n\n')
 }
@@ -157,7 +170,7 @@ export function chatMarkdown(meta: SessionMeta, history: ChatMessage[], opts: Ex
   let pending: Step[] = []
   const flush = (): void => {
     if (!pending.length) return
-    const md = stepsMarkdown(pending, opts, byParent)
+    const md = stepsMarkdown(pending, opts, byParent, ctx)
     if (md) out.push(md, '')
     pending = []
   }
@@ -168,7 +181,9 @@ export function chatMarkdown(meta: SessionMeta, history: ChatMessage[], opts: Ex
       out.push('## You', '', `<sub>${fmtTime(m.ts)}</sub>`, '')
       const t = textOf(m).trim()
       if (t) out.push(t, '')
-      if (m.images) out.push(`_(${plural(m.images, 'image')} attached)_`, '')
+      const shown = m.imageRefs?.length ? imagesMarkdown(m.imageRefs, ctx, 'image') : null
+      if (shown) out.push(shown, '')
+      else if (m.images) out.push(`_(${plural(m.images, 'image')} attached)_`, '')
       continue
     }
     if (m.role === 'system' || m.role === 'error') {
@@ -284,7 +299,22 @@ function addChat(bundle: Bundle, store: Store, meta: SessionMeta, base: string, 
     const f = files.find((x) => x.a.id === a.id)
     return f ? rel(chatDir, f.path) : undefined
   }
-  bundle.entries[bundle.entries.findIndex((e) => e.name === path)].data = chatMarkdown(meta, history, opts, { project, artifacts, artifactLink })
+  // images are added the first time something links to them
+  const images = new Map<string, string | undefined>()
+  const imageFile = (img: ImageRef): string | undefined => {
+    if (!images.has(img.id)) {
+      const data = store.loadImage(meta.id, img.id)
+      images.set(img.id, data ? bundle.add(`${base}images/${img.id}.${IMAGE_EXT[img.mediaType] ?? 'png'}`, data) : undefined)
+    }
+    return images.get(img.id)
+  }
+  const imageLink = (img: ImageRef): string | undefined => {
+    const f = imageFile(img)
+    return f ? rel(chatDir, f) : undefined
+  }
+  bundle.entries[bundle.entries.findIndex((e) => e.name === path)].data = chatMarkdown(meta, history, opts, { project, artifacts, artifactLink, imageLink })
+  // a backup restores every image, including screenshots the Markdown leaves out
+  if (opts.backup) for (const img of referencedImages(history)) imageFile(img)
   bundle.stats.chats++
   return { meta, path, artifacts: files }
 }
@@ -414,26 +444,43 @@ export function buildBackup(store: Store, scope: { projectId?: string }): Backup
   }
 }
 
-/** Read a backup from an export ZIP (or a bare backup JSON file). */
-export function parseBackup(buf: Buffer): Backup {
+/** Read a backup from an export ZIP (or a bare backup JSON file), with the chat images the ZIP carries. */
+export function readBackup(buf: Buffer): { backup: Backup; images: Map<string, Buffer> } {
+  const images = new Map<string, Buffer>()
   let json: string
   if (buf.subarray(0, 2).toString() === 'PK') {
-    const entry = readZip(buf).find((e) => e.name.endsWith('localclaude-backup.json'))
+    const entries = readZip(buf)
+    const entry = entries.find((e) => e.name.endsWith('localclaude-backup.json'))
     if (!entry) throw new Error('This ZIP has no localclaude-backup.json. Export again with "Include a backup to import later" turned on.')
     json = entry.data.toString('utf8')
+    for (const e of entries) {
+      const m = /(?:^|\/)images\/([0-9a-f-]{36})\.(?:png|jpg|gif|webp)$/i.exec(e.name)
+      if (m) images.set(m[1].toLowerCase(), e.data)
+    }
   } else json = buf.toString('utf8')
   const b = JSON.parse(json) as Backup
   if (b?.format !== 'localclaude-backup' || !Array.isArray(b.sessions)) throw new Error('This file is not a LocalClaude export.')
-  return b
+  return { backup: b, images }
 }
+
+export const parseBackup = (buf: Buffer): Backup => readBackup(buf).backup
 
 type ImportStore = Pick<
   SecureStore,
-  'getSession' | 'upsertSessions' | 'saveHistory' | 'saveArtifacts' | 'getProject' | 'upsertProject' | 'saveProjectFiles' | 'getGlobalMemory' | 'setGlobalMemory'
+  | 'getSession'
+  | 'upsertSessions'
+  | 'saveHistory'
+  | 'saveArtifacts'
+  | 'saveImage'
+  | 'getProject'
+  | 'upsertProject'
+  | 'saveProjectFiles'
+  | 'getGlobalMemory'
+  | 'setGlobalMemory'
 >
 
 /** Add what's in a backup. Nothing is overwritten: items that already exist here are skipped. */
-export function importBackup(store: ImportStore, b: Backup, transcripts: Set<string> = transcriptIds()): ImportResult {
+export function importBackup(store: ImportStore, b: Backup, transcripts: Set<string> = transcriptIds(), images: Map<string, Buffer> = new Map()): ImportResult {
   const r: ImportResult = { ok: true, chats: 0, projects: 0, artifacts: 0, memory: 0, skipped: 0, withoutTranscript: 0 }
   for (const { project, files } of b.projects ?? []) {
     if (!project?.id || store.getProject(project.id)) {
@@ -474,6 +521,10 @@ export function importBackup(store: ImportStore, b: Backup, transcripts: Set<str
     const artifacts = Array.isArray(s.artifacts) ? s.artifacts : []
     meta.artifactCount = artifacts.length
     store.saveHistory(meta.id, history)
+    for (const img of referencedImages(history)) {
+      const data = images.get(img.id)
+      if (data) store.saveImage(meta.id, img.id, data)
+    }
     if (artifacts.length) store.saveArtifacts(meta.id, artifacts)
     r.artifacts += artifacts.length
     metas.push(meta)

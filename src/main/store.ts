@@ -1,7 +1,7 @@
 // Encrypted, machine-bound local storage.
 //
 // Two layers protect everything this app saves (settings, MCP config, chat history,
-// artifacts, projects and their knowledge files):
+// images, artifacts, projects and their knowledge files):
 //   1. AES-256-GCM with a key derived (scrypt) from this machine's OS machine id.
 //      Copy the data folder to another PC and it cannot be decrypted there.
 //   2. Electron safeStorage on top (Windows DPAPI / Linux libsecret keyring),
@@ -32,6 +32,7 @@ export class SecureStore {
   private sessionsDir = join(this.dir, 'sessions')
   private artifactsDir = join(this.dir, 'artifacts')
   private projectsDir = join(this.dir, 'projects')
+  private imagesDir = join(this.dir, 'images')
   private key!: Buffer
   private machineHash!: string
   private vault!: Vault
@@ -97,10 +98,10 @@ export class SecureStore {
   }
 
   // ---------- crypto ----------
-  private encrypt(plain: string): Buffer {
+  private encrypt(plain: string | Buffer): Buffer {
     const iv = randomBytes(12)
     const c = createCipheriv('aes-256-gcm', this.key, iv)
-    const body = Buffer.concat([c.update(plain, 'utf8'), c.final()])
+    const body = Buffer.concat([typeof plain === 'string' ? c.update(plain, 'utf8') : c.update(plain), c.final()])
     let out = Buffer.concat([MAGIC, iv, c.getAuthTag(), body])
     if (safeStorage.isEncryptionAvailable()) {
       out = Buffer.concat([Buffer.from('S'), safeStorage.encryptString(out.toString('base64'))])
@@ -111,6 +112,10 @@ export class SecureStore {
   }
 
   private decrypt(buf: Buffer): string {
+    return this.decryptBytes(buf).toString('utf8')
+  }
+
+  private decryptBytes(buf: Buffer): Buffer {
     let inner: Buffer
     const tag = buf.subarray(0, 1).toString()
     if (tag === 'S') inner = Buffer.from(safeStorage.decryptString(buf.subarray(1)), 'base64')
@@ -121,7 +126,7 @@ export class SecureStore {
     const authTag = inner.subarray(16, 32)
     const d = createDecipheriv('aes-256-gcm', this.key, iv)
     d.setAuthTag(authTag)
-    return Buffer.concat([d.update(inner.subarray(32)), d.final()]).toString('utf8')
+    return Buffer.concat([d.update(inner.subarray(32)), d.final()])
   }
 
   private atomicWrite(file: string, data: Buffer): void {
@@ -171,6 +176,7 @@ export class SecureStore {
     this.saveVault()
     rmSync(this.historyFile(id), { force: true })
     rmSync(this.artifactsFile(id), { force: true })
+    rmSync(this.imageDir(id), { recursive: true, force: true })
   }
 
   private historyFile(id: string): string {
@@ -187,6 +193,39 @@ export class SecureStore {
   }
   saveHistory(id: string, messages: ChatMessage[]): void {
     this.atomicWrite(this.historyFile(id), this.encrypt(JSON.stringify(messages)))
+  }
+
+  // ---------- images (one encrypted file each, in a folder per chat) ----------
+  private imageDir(sessionId: string): string {
+    return join(this.imagesDir, sessionId.replace(/[^a-zA-Z0-9-]/g, ''))
+  }
+  private imageFile(sessionId: string, id: string): string {
+    return join(this.imageDir(sessionId), id.replace(/[^a-zA-Z0-9-]/g, '') + '.bin')
+  }
+  saveImage(sessionId: string, id: string, data: Buffer): void {
+    mkdirSync(this.imageDir(sessionId), { recursive: true })
+    this.atomicWrite(this.imageFile(sessionId, id), this.encrypt(data))
+  }
+  loadImage(sessionId: string, id: string): Buffer | null {
+    const f = this.imageFile(sessionId, id)
+    if (!existsSync(f)) return null
+    try {
+      return this.decryptBytes(readFileSync(f))
+    } catch {
+      return null
+    }
+  }
+  /** Delete a chat's images that its history no longer points to (after rewinds and edits). */
+  pruneImages(sessionId: string, keep: Set<string>): number {
+    const dir = this.imageDir(sessionId)
+    if (!existsSync(dir)) return 0
+    let n = 0
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.bin') || keep.has(f.slice(0, -4))) continue
+      rmSync(join(dir, f), { force: true })
+      n++
+    }
+    return n
   }
 
   // ---------- memory ----------

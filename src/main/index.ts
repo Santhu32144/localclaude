@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeTheme, Notification, protocol, screen, shell } from 'electron'
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, Notification, protocol, screen, shell } from 'electron'
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,17 +24,22 @@ import { renderArtifactPage } from './artifacts'
 import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, startLogin } from './claude'
 import { stopComputerHelper } from './computer'
 import { attachContextMenu } from './contextMenu'
+import { IMAGE_EXT, sniffImageType, thumbnail } from './images'
 import { notificationFor } from './notify'
 import { generateTitle } from './titles'
 import { fitToScreens, loadWindowState, trackWindowState } from './windowState'
-import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, parseBackup, projectContext } from './exporter'
+import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, projectContext, readBackup } from './exporter'
 import { addMemory, editMemory, getMemory, removeMemory, setMemory } from './memory'
 import { addProjectFiles, createProject, removeProjectFile, updateProject } from './projects'
 import { SecureStore } from './store'
 import { createZip } from './zip'
 
-// Artifact previews load from artifact://view/<chat>/<artifact>/<version> in a sandboxed frame.
-protocol.registerSchemesAsPrivileged([{ scheme: 'artifact', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
+// Artifact previews load from artifact://view/<chat>/<artifact>/<version> in a sandboxed frame;
+// chat images from lcimg://chat/<chat>/<image> (decrypted on request).
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'artifact', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  { scheme: 'lcimg', privileges: { standard: true, secure: true } }
+])
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
@@ -297,7 +302,8 @@ function registerIpc(): void {
     })
     if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true, ...empty }
     try {
-      return importBackup(store, parseBackup(readFileSync(r.filePaths[0])))
+      const { backup, images } = readBackup(readFileSync(r.filePaths[0]))
+      return importBackup(store, backup, undefined, images)
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e), ...empty }
     }
@@ -312,6 +318,32 @@ function registerIpc(): void {
     return r
   })
   handle('projects:removeFile', (id: string, fileId: string) => projectChanged(removeProjectFile(store, id, fileId)))
+  handle('image:copy', async (sessionId: string, id: string) => {
+    const data = store.loadImage(sessionId, id)
+    if (!data) return false
+    // the clipboard takes PNG; other types are converted (GIF/WebP only if Chromium can decode them)
+    let png: Buffer | null = sniffImageType(data) === 'image/png' ? data : null
+    if (!png) {
+      const img = nativeImage.createFromBuffer(data)
+      png = img.isEmpty() ? null : img.toPNG()
+    }
+    if (!png) return false
+    await clipboard.write([new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) })])
+    return true
+  })
+  handle('image:save', async (sessionId: string, id: string): Promise<{ ok: boolean; path?: string }> => {
+    const data = store.loadImage(sessionId, id)
+    if (!data) return { ok: false }
+    const ext = IMAGE_EXT[sniffImageType(data) ?? ''] ?? 'png'
+    const r = await dialog.showSaveDialog(win!, {
+      title: 'Save image',
+      defaultPath: join(app.getPath('downloads'), `image-${id.slice(0, 8)}.${ext}`),
+      filters: [{ name: 'Image', extensions: [ext] }]
+    })
+    if (r.canceled || !r.filePath) return { ok: false }
+    writeFileSync(r.filePath, data)
+    return { ok: true, path: r.filePath }
+  })
   handle('sessions:history', (id: string) => manager.history(id))
   handle('sessions:running', (id: string) => manager.isRunning(id))
 
@@ -382,6 +414,21 @@ function serveArtifacts(): void {
         'content-type': 'text/html; charset=utf-8',
         'content-security-policy': "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'"
       }
+    })
+  })
+}
+
+/** Serves chat images (?w=480 for a smaller copy). Ids are random, so other pages can't guess them. */
+function serveImages(): void {
+  protocol.handle('lcimg', (req) => {
+    const url = new URL(req.url)
+    const [sessionId, imageId] = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
+    const data = store.lock.ok && sessionId && imageId ? store.loadImage(sessionId, imageId) : null
+    if (!data) return new Response('Image not found', { status: 404 })
+    const w = Math.min(2000, Math.max(0, Number(url.searchParams.get('w')) || 0))
+    const body = w ? thumbnail(data, w, `${sessionId}/${imageId}`) : data
+    return new Response(new Uint8Array(body), {
+      headers: { 'content-type': sniffImageType(body) ?? 'application/octet-stream', 'cache-control': 'private, max-age=31536000, immutable' }
     })
   })
 }
@@ -457,6 +504,7 @@ app.whenReady().then(() => {
   )
   registerIpc()
   serveArtifacts()
+  serveImages()
   createWindow()
   if (store.lock.ok) applyQuickShortcut(store.getSettings().quickShortcut)
 })

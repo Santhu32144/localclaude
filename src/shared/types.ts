@@ -89,6 +89,15 @@ export interface DiffHunk {
   lines: string[]
 }
 
+/** An image kept with a chat (what you attached, or what a tool returned such as a screenshot).
+ * The bytes are stored encrypted next to the chat and shown through lcimg://. */
+export interface ImageRef {
+  id: string
+  mediaType: string
+  width?: number
+  height?: number
+}
+
 export type ContentPart =
   | { kind: 'text'; text: string }
   | { kind: 'thinking'; text: string }
@@ -102,6 +111,8 @@ export type ContentPart =
       isError?: boolean
       /** structured diff from Claude Code (Edit/Write) */
       patch?: DiffHunk[]
+      /** images the tool returned (screenshots, image files Claude read) */
+      images?: ImageRef[]
       done: boolean
     }
 
@@ -111,7 +122,10 @@ export interface ChatMessage {
   parts: ContentPart[]
   /** set for messages produced inside a subagent (Agent/Task tool) */
   parentToolUseId?: string | null
+  /** user messages: how many images were attached */
   images?: number
+  /** user messages: the attached images (chats from before images were kept only have the count) */
+  imageRefs?: ImageRef[]
   ts: number
   /** user messages: the UUID sent to Claude Code (file checkpoint id) */
   uuid?: string
@@ -208,7 +222,7 @@ export type AgentEvent =
   | { type: 'tool-start'; sessionId: string; messageId: string; partIndex: number; toolUseId: string; name: string }
   | { type: 'tool-input-delta'; sessionId: string; messageId: string; partIndex: number; json: string }
   | { type: 'message-final'; sessionId: string; message: ChatMessage }
-  | { type: 'tool-result'; sessionId: string; toolUseId: string; result: string; isError: boolean; patch?: DiffHunk[] }
+  | { type: 'tool-result'; sessionId: string; toolUseId: string; result: string; isError: boolean; patch?: DiffHunk[]; images?: ImageRef[] }
   | { type: 'turn-done'; sessionId: string; stats: TurnStats; isError: boolean; errorText?: string }
   | { type: 'error'; sessionId: string; text: string }
   | { type: 'rate-limit'; sessionId: string; info: RateLimitInfo }
@@ -252,6 +266,8 @@ export interface SendPayload {
   sessionId: string
   text: string
   attachments: Attachment[]
+  /** images already saved with this chat to send again (editing or retrying a message) */
+  reuseImages?: ImageRef[]
 }
 
 export interface LoginEvent {
