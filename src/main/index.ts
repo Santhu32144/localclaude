@@ -2,13 +2,32 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, shell } fro
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { AgentEvent, AppSettings, Attachment, PermissionDecision, PermissionModeUI, Project, RewindRequest, SendPayload, SessionMeta } from '../shared/types'
+import { artifactExt, safeFileName } from '../shared/format'
+import {
+  DEFAULT_EXPORT_OPTIONS,
+  type AgentEvent,
+  type AppSettings,
+  type Attachment,
+  type ExportRequest,
+  type ExportResult,
+  type ImportResult,
+  type MemoryItem,
+  type PermissionDecision,
+  type PermissionModeUI,
+  type Project,
+  type RewindRequest,
+  type SendPayload,
+  type SessionMeta
+} from '../shared/types'
 import { SessionManager } from './agent'
 import { renderArtifactPage } from './artifacts'
 import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, startLogin } from './claude'
 import { stopComputerHelper } from './computer'
+import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, parseBackup, projectContext } from './exporter'
+import { addMemory, editMemory, getMemory, removeMemory, setMemory } from './memory'
 import { addProjectFiles, createProject, removeProjectFile, updateProject } from './projects'
 import { SecureStore } from './store'
+import { createZip } from './zip'
 
 // Artifact previews load from artifact://view/<chat>/<artifact>/<version> in a sandboxed frame.
 protocol.registerSchemesAsPrivileged([{ scheme: 'artifact', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
@@ -141,8 +160,8 @@ function registerIpc(): void {
     const a = store.loadArtifacts(sessionId).find((x) => x.id === artifactId)
     const v = a?.versions[version]
     if (!a || !v) return false
-    const ext = { html: 'html', react: 'jsx', svg: 'svg', markdown: 'md', mermaid: 'mmd', code: a.language ? codeExt(a.language) : 'txt' }[a.type]
-    const r = await dialog.showSaveDialog(win!, { title: 'Save artifact', defaultPath: a.title.replace(/[\\/:*?"<>|]+/g, '-') + '.' + ext })
+    const ext = artifactExt(a)
+    const r = await dialog.showSaveDialog(win!, { title: 'Save artifact', defaultPath: safeFileName(a.title) + '.' + ext })
     if (r.canceled || !r.filePath) return false
     writeFileSync(r.filePath, v.content)
     return true
@@ -156,7 +175,100 @@ function registerIpc(): void {
   }
   handle('projects:list', () => store.listProjects())
   handle('projects:create', (input: { name: string; description?: string }) => createProject(store, input))
-  handle('projects:update', (id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd'>>) => projectChanged(updateProject(store, id, patch)))
+  handle('projects:update', (id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd' | 'pinned'>>) => {
+    const p = updateProject(store, id, patch)
+    return Object.keys(patch).every((k) => k === 'pinned') ? p : projectChanged(p)
+  })
+  // Artifacts from every chat in a project, newest first.
+  handle('projects:artifacts', (id: string) =>
+    store
+      .listSessions()
+      .filter((s) => s.projectId === id && s.artifactCount)
+      .flatMap((s) =>
+        store.loadArtifacts(s.id).map((a) => ({ sessionId: s.id, chatTitle: s.title, id: a.id, title: a.title, type: a.type, versions: a.versions.length, updatedAt: a.updatedAt }))
+      )
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+  )
+  handle('projects:context', (id: string) => {
+    const p = store.getProject(id)
+    return p ? projectContext(p, store.loadProjectFiles(id)) : null
+  })
+
+  // ---- memory (global when projectId is null)
+  const memoryState = (projectId: string | null): { items: MemoryItem[]; project?: Project } => {
+    // memory is part of the system prompt: idle chats restart to pick up your edits
+    manager.restartIdle()
+    const project = projectId ? store.getProject(projectId) : undefined
+    return { items: getMemory(store, projectId ?? undefined), project }
+  }
+  handle('memory:global', () => store.getGlobalMemory())
+  handle('memory:add', (projectId: string | null, text: string) => {
+    addMemory(store, projectId ?? undefined, text, 'you')
+    return memoryState(projectId)
+  })
+  handle('memory:edit', (projectId: string | null, id: string, text: string) => {
+    editMemory(store, projectId ?? undefined, id, text)
+    return memoryState(projectId)
+  })
+  handle('memory:remove', (projectId: string | null, id: string) => {
+    removeMemory(store, projectId ?? undefined, id)
+    return memoryState(projectId)
+  })
+  handle('memory:clear', (projectId: string | null) => {
+    setMemory(store, projectId ?? undefined, [])
+    return memoryState(projectId)
+  })
+
+  // ---- export / import
+  handle('export:run', async (req: ExportRequest): Promise<ExportResult> => {
+    const opts = { ...DEFAULT_EXPORT_OPTIONS, ...req.options }
+    const none = { chats: 0, artifacts: 0, files: 0 }
+    try {
+      manager.flushAll()
+      if (req.scope === 'chat') {
+        const meta = req.sessionId ? store.getSession(req.sessionId) : undefined
+        if (!meta) return { ok: false, error: 'Chat not found', ...none }
+        const artifacts = opts.artifacts === 'none' ? [] : store.loadArtifacts(meta.id)
+        const project = meta.projectId ? store.getProject(meta.projectId) : undefined
+        const r = await dialog.showSaveDialog(win!, {
+          title: 'Export chat',
+          defaultPath: safeFileName(meta.title) + '.md',
+          filters: [{ name: 'Markdown', extensions: ['md'] }]
+        })
+        if (r.canceled || !r.filePath) return { ok: false, canceled: true, ...none }
+        writeFileSync(r.filePath, chatMarkdown(meta, store.loadHistory(meta.id), opts, { project, artifacts }))
+        return { ok: true, path: r.filePath, chats: 1, artifacts: artifacts.length, files: 0 }
+      }
+      const project = req.scope === 'project' && req.projectId ? store.getProject(req.projectId) : undefined
+      if (req.scope === 'project' && !project) return { ok: false, error: 'Project not found', ...none }
+      const built = project ? buildProjectExport(store, project, opts) : buildFullExport(store, opts)
+      const r = await dialog.showSaveDialog(win!, {
+        title: project ? 'Export project' : 'Export everything',
+        defaultPath: built.name + '.zip',
+        filters: [{ name: 'ZIP archive', extensions: ['zip'] }]
+      })
+      if (r.canceled || !r.filePath) return { ok: false, canceled: true, ...none }
+      writeFileSync(r.filePath, createZip(built.entries))
+      return { ok: true, path: r.filePath, ...built.stats }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), ...none }
+    }
+  })
+  handle('export:reveal', (p: string) => shell.showItemInFolder(p))
+  handle('import:run', async (): Promise<ImportResult> => {
+    const empty = { chats: 0, projects: 0, artifacts: 0, memory: 0, skipped: 0, withoutTranscript: 0 }
+    const r = await dialog.showOpenDialog(win!, {
+      title: 'Import a LocalClaude export',
+      properties: ['openFile'],
+      filters: [{ name: 'LocalClaude export', extensions: ['zip', 'json'] }]
+    })
+    if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true, ...empty }
+    try {
+      return importBackup(store, parseBackup(readFileSync(r.filePaths[0])))
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), ...empty }
+    }
+  })
   handle('projects:delete', (id: string) => {
     store.deleteProject(id)
     manager.restartIdle()
@@ -222,11 +334,6 @@ function registerIpc(): void {
     if (/^https?:\/\//.test(url)) return shell.openExternal(url)
     return undefined
   })
-}
-
-const CODE_EXT: Record<string, string> = { python: 'py', javascript: 'js', typescript: 'ts', tsx: 'tsx', jsx: 'jsx', bash: 'sh', shell: 'sh', powershell: 'ps1', csharp: 'cs', 'c#': 'cs', cpp: 'cpp', 'c++': 'cpp', c: 'c', java: 'java', go: 'go', rust: 'rs', ruby: 'rb', php: 'php', sql: 'sql', json: 'json', yaml: 'yml', css: 'css', html: 'html', kotlin: 'kt', swift: 'swift' }
-function codeExt(lang: string): string {
-  return CODE_EXT[lang.toLowerCase()] ?? 'txt'
 }
 
 /** Serves artifact previews. Each page gets its own permissive CSP (it runs in a sandboxed frame with no access to the app). */

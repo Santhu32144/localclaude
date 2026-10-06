@@ -9,8 +9,9 @@ import type {
   ChatMessage,
   ContentPart,
   DiffHunk,
-  Project,
   McpStatus,
+  MemoryItem,
+  Project,
   PermissionDecision,
   PermissionModeUI,
   RewindPreview,
@@ -21,6 +22,9 @@ import type {
 import { resolveClaudeBinary, subscriptionEnv } from './claude'
 import { ARTIFACT_TOOLS, createArtifactServer } from './artifacts'
 import { createComputerServer } from './computer'
+import { importedContext } from './exporter'
+import { PROJECT_KNOWLEDGE_LIMIT_CHARS } from './limits'
+import { MEMORY_TOOLS, createMemoryServer, memoryPrompt } from './memory'
 import type { SecureStore } from './store'
 
 /** forkAt value for a chat's first message: rewinding there starts a fresh transcript. */
@@ -128,12 +132,29 @@ class AgentSession {
     }
     // A fresh in-process server per query: an MCP server instance serves one connection.
     if (s.computerUse) mcpServers['computer-use'] = createComputerServer()
+    const project = this.meta.projectId ? this.store.getProject(this.meta.projectId) : undefined
     if (s.artifacts)
       mcpServers['artifacts'] = createArtifactServer({
         sessionId: this.meta.id,
         store: this.store,
-        onChange: (artifact) => this.emitRaw({ type: 'artifact', sessionId: this.meta.id, artifact })
+        onChange: (artifact, count) => {
+          this.emitRaw({ type: 'artifact', sessionId: this.meta.id, artifact })
+          if (count !== this.meta.artifactCount) this.touchMeta({ artifactCount: count })
+        }
       })
+    if (s.memory)
+      mcpServers['memory'] = createMemoryServer({
+        store: this.store,
+        sessionId: this.meta.id,
+        projectId: project?.id,
+        onChange: (projectId) => {
+          const p = projectId ? this.store.getProject(projectId) : undefined
+          if (p) this.emitRaw({ type: 'project', project: p })
+          else this.emitRaw({ type: 'global-memory', items: this.store.getGlobalMemory() })
+        }
+      })
+    // Artifacts and memory only write to LocalClaude's own storage, so they never need a prompt.
+    const autoAllowed = [...(s.artifacts ? ARTIFACT_TOOLS : []), ...(s.memory ? MEMORY_TOOLS : [])]
 
     this.abort = new AbortController()
     this.startedWithBypass = this.meta.permissionMode === 'bypassPermissions'
@@ -150,9 +171,15 @@ class AgentSession {
       env: subscriptionEnv(),
       pathToClaudeCodeExecutable: resolveClaudeBinary(),
       settingSources: sources,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: systemAppend(s.appendSystemPrompt, this.meta.projectId ? this.store.getProject(this.meta.projectId) : undefined, this.store) },
-      // Creating artifacts only writes to LocalClaude's own storage, so it never needs a prompt.
-      allowedTools: s.artifacts ? ARTIFACT_TOOLS : undefined,
+      systemPrompt: {
+        type: 'preset',
+        preset: 'claude_code',
+        append: systemAppend(s.appendSystemPrompt, project, this.store, s.memory ? { global: this.store.getGlobalMemory() } : null)
+      },
+      allowedTools: autoAllowed.length ? autoAllowed : undefined,
+      // LocalClaude keeps memory and artifacts itself, encrypted on this machine. Claude Code's own
+      // auto-memory files and its Artifact tool (which publishes pages to claude.ai) stay off here.
+      settings: { autoMemoryEnabled: false, enableArtifact: false },
       mcpServers,
       extraArgs: s.chromeIntegration ? { chrome: null } : undefined,
       effort: s.effort || undefined,
@@ -195,6 +222,14 @@ class AgentSession {
     }
   }
 
+  /** Write any history still waiting for its debounced save. */
+  flush(): void {
+    if (!this.saveTimer) return
+    clearTimeout(this.saveTimer)
+    this.saveTimer = undefined
+    this.store.saveHistory(this.meta.id, this.history)
+  }
+
   /** Stop the Claude Code process for this chat (it resumes on the next message). */
   shutdown(): void {
     this.queue?.close()
@@ -219,6 +254,8 @@ class AgentSession {
     }
     if (p.text.trim()) content.push({ type: 'text', text: p.text })
     if (!content.length) return
+    // A chat restored from an export has no Claude Code transcript here: send the earlier messages as context once.
+    if (this.meta.imported && !this.meta.sdkSessionId && this.history.length) content.unshift({ type: 'text', text: importedContext(this.meta, this.history) })
 
     const uuid = randomUUID()
     const userMsg: ChatMessage = {
@@ -491,6 +528,8 @@ class AgentSession {
           }
           // A pending conversation rewind is applied by this start; later starts resume normally.
           if (this.meta.resumeAt) this.touchMeta({ resumeAt: undefined })
+          // An imported chat now has its own transcript, which includes the context we sent.
+          if (this.meta.imported) this.touchMeta({ imported: undefined })
           this.emitRaw({
             type: 'init',
             sessionId: sid,
@@ -698,11 +737,15 @@ class AgentSession {
   }
 }
 
-/** Knowledge beyond this many characters is cut off (it rides along with every turn). */
-export const PROJECT_KNOWLEDGE_LIMIT = 400_000
+export const PROJECT_KNOWLEDGE_LIMIT = PROJECT_KNOWLEDGE_LIMIT_CHARS
 
-/** Personal instructions, then the project's instructions and knowledge files. */
-export function systemAppend(personal: string, project: Project | undefined, store: Pick<SecureStore, 'loadProjectFiles'>): string | undefined {
+/** Personal instructions, then the project's instructions and knowledge files, then memory (when on). */
+export function systemAppend(
+  personal: string,
+  project: Project | undefined,
+  store: Pick<SecureStore, 'loadProjectFiles'>,
+  memory: { global: MemoryItem[] } | null = null
+): string | undefined {
   const parts: string[] = []
   if (personal?.trim()) parts.push(personal.trim())
   if (project) {
@@ -725,6 +768,7 @@ export function systemAppend(personal: string, project: Project | undefined, sto
     lines.push('</project>')
     parts.push("This chat is part of the user's project below. Follow its instructions and use its knowledge files when relevant.\n" + lines.join('\n'))
   }
+  if (memory) parts.push(memoryPrompt(memory.global, project ? { name: project.name, items: project.memory ?? [] } : undefined))
   return parts.length ? parts.join('\n\n') : undefined
 }
 
@@ -844,6 +888,10 @@ export class SessionManager {
     this.sessions.get(id)?.shutdown()
     this.sessions.delete(id)
     this.store.deleteSession(id)
+  }
+  /** Save every open chat's history now (before exporting). */
+  flushAll(): void {
+    for (const s of this.sessions.values()) s.flush()
   }
   restartIdle(): void {
     for (const s of this.sessions.values()) s.restartIfIdle()

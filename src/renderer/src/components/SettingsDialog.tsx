@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
-import type { AppSettings, AuthStatus, LockStatus, McpServerEntry } from '../../../shared/types'
+import type { AppSettings, AuthStatus, LockStatus, McpServerEntry, MemoryItem } from '../../../shared/types'
 import { api } from '../api'
 import { REPLY_FONTS, UI_FONTS } from '../fonts'
+import { MemoryList } from './Memory'
 
 const TABS: [string, string][] = [
   ['general', 'General'],
   ['tools', 'Tools & computer'],
+  ['memory', 'Memory & data'],
   ['account', 'Account & privacy'],
   ['about', 'About']
 ]
@@ -88,6 +90,10 @@ export function SettingsDialog(props: {
   onChange: (p: Partial<AppSettings>) => Promise<void>
   onClose: () => void
   onLogout: () => Promise<void>
+  globalMemory: MemoryItem[]
+  onGlobalMemory: (items: MemoryItem[]) => void
+  onExportAll: () => void
+  onImport: () => void
 }) {
   const s = props.settings
   const [lock, setLock] = useState<LockStatus | null>(null)
@@ -282,6 +288,60 @@ export function SettingsDialog(props: {
               </label>
               <McpEditor settings={s} onChange={props.onChange} />
               <p className="muted small">Changes apply to each chat the next time you send a message.</p>
+            </>
+          )}
+
+          {props.tab === 'memory' && (
+            <>
+              <h2>Memory & data</h2>
+              <label className="toggle">
+                <input type="checkbox" checked={s.memory} onChange={(e) => void props.onChange({ memory: e.target.checked })} />
+                <span>
+                  <b>Let Claude remember things across chats</b>
+                  <span className="muted small">
+                    Claude saves useful facts, like your preferences or a project’s decisions, and sees them in later chats. Memory in a project stays in that
+                    project. You can edit or delete anything below or on a project’s page. Stored encrypted on this machine.
+                  </span>
+                </span>
+              </label>
+              <div className="field">
+                <label>
+                  Memory across all chats{' '}
+                  <span className="muted small">
+                    {props.globalMemory.length} item{props.globalMemory.length === 1 ? '' : 's'}
+                  </span>
+                </label>
+                <MemoryList
+                  items={props.globalMemory}
+                  projectId={null}
+                  enabled={s.memory}
+                  onEnable={() => void props.onChange({ memory: true })}
+                  onChange={(items) => props.onGlobalMemory(items)}
+                />
+              </div>
+              <label className="toggle">
+                <input type="checkbox" checked={s.artifacts} onChange={(e) => void props.onChange({ artifacts: e.target.checked })} />
+                <span>
+                  <b>Artifacts</b>
+                  <span className="muted small">Claude can make web pages, apps, diagrams and documents that open in a side panel, with version history.</span>
+                </span>
+              </label>
+              <div className="field">
+                <label>Export & import</label>
+                <p className="muted small">
+                  Export every chat as Markdown, with artifacts, project knowledge files, instructions and memory, in one ZIP. Include the backup to
+                  import it again here or on another computer, since LocalClaude’s own data only opens on this machine.
+                </p>
+                <div className="row gap">
+                  <button className="btn" onClick={props.onExportAll}>
+                    Export all chats…
+                  </button>
+                  <button className="btn ghost" onClick={props.onImport}>
+                    Import from an export…
+                  </button>
+                </div>
+                <p className="muted small">Single chats and projects can be exported from their ⋯ menus too (Ctrl+Shift+E).</p>
+              </div>
             </>
           )}
 

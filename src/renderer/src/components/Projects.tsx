@@ -1,8 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import type { Project, SessionMeta } from '../../../shared/types'
+import { ARTIFACT_LABEL } from '../../../shared/format'
+import type { MemoryItem, Project, ProjectArtifactRef, ProjectContextUsage, SessionMeta } from '../../../shared/types'
 import { api } from '../api'
+import { artifactIcon } from './ArtifactPanel'
 import { Icon } from './Icon'
-import { Menu } from './Menu'
+import { MemoryList } from './Memory'
+import { Menu, type MenuEntry } from './Menu'
 
 const ago = (ts: number): string => {
   const m = Math.round((Date.now() - ts) / 60000)
@@ -14,6 +17,9 @@ const ago = (ts: number): string => {
   return d < 30 ? `${d} day${d === 1 ? '' : 's'} ago` : new Date(ts).toLocaleDateString()
 }
 const kb = (n: number): string => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`)
+const tokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
+/** Context window the project's share is measured against. */
+const CONTEXT_WINDOW = 200_000
 
 function TitleBar({ left, children }: { left: ReactNode; children?: ReactNode }) {
   return (
@@ -26,19 +32,25 @@ function TitleBar({ left, children }: { left: ReactNode; children?: ReactNode })
   )
 }
 
-/** All projects, like the Claude app's Projects page. */
+/** All projects, like the Claude app's Projects page. Pinned projects come first. */
 export function ProjectsView(props: {
   projects: Project[]
   sessions: SessionMeta[]
   headerLeft: ReactNode
   onOpen: (id: string) => void
   onCreated: (p: Project) => void
+  onPin: (id: string, pinned: boolean) => void
+  onExport: (id: string) => void
+  onDeleted: (id: string) => void
 }) {
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
   const [filter, setFilter] = useState('')
-  const shown = props.projects.filter((p) => !filter.trim() || (p.name + ' ' + p.description).toLowerCase().includes(filter.trim().toLowerCase()))
+  const [sort, setSort] = useState<'activity' | 'name'>('activity')
+  const shown = props.projects
+    .filter((p) => !filter.trim() || (p.name + ' ' + p.description).toLowerCase().includes(filter.trim().toLowerCase()))
+    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || (sort === 'name' ? a.name.localeCompare(b.name) : b.updatedAt - a.updatedAt))
 
   const create = async (): Promise<void> => {
     if (!name.trim()) return
@@ -77,28 +89,72 @@ export function ProjectsView(props: {
             </div>
           )}
           {props.projects.length > 0 && (
-            <div className="side-search page-search">
-              <Icon name="search" size={15} />
-              <input placeholder="Search projects…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+            <div className="row gap">
+              <div className="side-search page-search grow">
+                <Icon name="search" size={15} />
+                <input placeholder="Search projects…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+              </div>
+              <Menu
+                align="right"
+                title="Sort"
+                trigger={
+                  <span className="sort-trigger small">
+                    Sort: {sort === 'activity' ? 'Activity' : 'Name'} <Icon name="chevronDown" size={12} />
+                  </span>
+                }
+                entries={[
+                  { key: 'activity', label: 'Recent activity', checked: sort === 'activity', onSelect: () => setSort('activity') },
+                  { key: 'name', label: 'Name', checked: sort === 'name', onSelect: () => setSort('name') }
+                ]}
+              />
             </div>
           )}
           <div className="project-grid">
             {shown.map((p) => {
               const chats = props.sessions.filter((s) => s.projectId === p.id).length
               return (
-                <button key={p.id} className="project-card" onClick={() => props.onOpen(p.id)}>
-                  <span className="project-card-name">{p.name}</span>
+                <div key={p.id} className="project-card" role="button" tabIndex={0} onClick={() => props.onOpen(p.id)} onKeyDown={(e) => e.key === 'Enter' && props.onOpen(p.id)}>
+                  <div className="project-card-top">
+                    <span className="project-card-name">{p.name}</span>
+                    {p.pinned && (
+                      <span className="muted" title="Pinned">
+                        <Icon name="pin" size={14} />
+                      </span>
+                    )}
+                    <div className="card-menu" onClick={(e) => e.stopPropagation()}>
+                      <Menu
+                        align="right"
+                        title="Project options"
+                        trigger={<span className="more-dots">⋯</span>}
+                        entries={[
+                          { key: 'pin', label: p.pinned ? 'Unpin from sidebar' : 'Pin to sidebar', onSelect: () => props.onPin(p.id, !p.pinned) },
+                          { key: 'export', label: 'Export project…', onSelect: () => props.onExport(p.id) },
+                          'divider',
+                          {
+                            key: 'delete',
+                            label: 'Delete project',
+                            danger: true,
+                            onSelect: () => {
+                              if (confirm(`Delete the project "${p.name}"? Its chats are kept and just leave the project.`)) void api.deleteProject(p.id).then(() => props.onDeleted(p.id))
+                            }
+                          }
+                        ]}
+                      />
+                    </div>
+                  </div>
                   {p.description && <span className="project-card-desc">{p.description}</span>}
                   <span className="muted small">
-                    {chats} chat{chats === 1 ? '' : 's'} · updated {ago(p.updatedAt)}
+                    {chats} chat{chats === 1 ? '' : 's'}
+                    {p.files.length ? ` · ${p.files.length} file${p.files.length === 1 ? '' : 's'}` : ''}
+                    {p.memory?.length ? ` · ${p.memory.length} memor${p.memory.length === 1 ? 'y' : 'ies'}` : ''} · updated {ago(p.updatedAt)}
                   </span>
-                </button>
+                </div>
               )
             })}
           </div>
           {!props.projects.length && !creating && (
             <div className="empty-projects muted">
-              Projects keep related chats together with shared instructions and knowledge files, so Claude has the context every time.
+              Projects keep related chats together with shared instructions, knowledge files and memory, so Claude has the context every time.
             </div>
           )}
         </div>
@@ -107,17 +163,56 @@ export function ProjectsView(props: {
   )
 }
 
-/** One project: start a chat, see its chats, edit instructions, knowledge and folder. */
+/** How much of Claude's context the project's instructions, knowledge and memory take. */
+function ContextCard({ usage }: { usage: ProjectContextUsage | null }) {
+  if (!usage) return null
+  const pct = (n: number): number => Math.min(100, (n / CONTEXT_WINDOW) * 100)
+  const total = Math.round(pct(usage.total))
+  return (
+    <div className="side-card">
+      <div className="side-card-head">
+        <span>Context</span>
+        <span className="muted small">{total < 1 && usage.total > 0 ? '<1' : total}% of context</span>
+      </div>
+      <div className="context-bar" title={`About ${usage.total.toLocaleString()} tokens of a ${tokens(CONTEXT_WINDOW)}-token context window`}>
+        <span className="seg instr" style={{ width: `${pct(usage.instructions)}%` }} />
+        <span className="seg know" style={{ width: `${pct(usage.knowledge)}%` }} />
+        <span className="seg mem" style={{ width: `${pct(usage.memory)}%` }} />
+      </div>
+      <div className="context-legend small">
+        <span>
+          <i className="instr" /> Instructions {tokens(usage.instructions)}
+        </span>
+        <span>
+          <i className="know" /> Knowledge {tokens(usage.knowledge)}
+        </span>
+        <span>
+          <i className="mem" /> Memory {tokens(usage.memory)}
+        </span>
+      </div>
+      <div className="muted small">
+        About {usage.total.toLocaleString()} tokens are sent with every message in this project{usage.truncated ? '. Knowledge is over the limit and gets cut off' : ''}.
+      </div>
+    </div>
+  )
+}
+
+/** One project: start a chat, see its chats and artifacts, edit instructions, knowledge, memory and folder. */
 export function ProjectView(props: {
   project: Project
   sessions: SessionMeta[]
   headerLeft: ReactNode
   defaultCwd: string
+  memoryEnabled: boolean
+  onEnableMemory: () => void
   onBack: () => void
   onChanged: (p: Project) => void
   onDeleted: () => void
   onOpenChat: (id: string) => void
+  onOpenArtifact: (sessionId: string, artifactId: string) => void
   onStartChat: (text: string) => void
+  onExport: () => void
+  onPin: (pinned: boolean) => void
 }) {
   const p = props.project
   const [text, setText] = useState('')
@@ -125,11 +220,38 @@ export function ProjectView(props: {
   const [editingInstr, setEditingInstr] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [renaming, setRenaming] = useState<{ name: string; description: string } | null>(null)
+  const [artifacts, setArtifacts] = useState<ProjectArtifactRef[]>([])
+  const [usage, setUsage] = useState<ProjectContextUsage | null>(null)
+  const [chatFilter, setChatFilter] = useState('')
   useEffect(() => setInstr(p.instructions), [p.id, p.instructions])
   const chats = props.sessions.filter((s) => s.projectId === p.id)
+  const artifactKey = chats.map((s) => `${s.id}:${s.artifactCount ?? 0}`).join(',')
+  useEffect(() => {
+    void api.projectArtifacts(p.id).then(setArtifacts)
+  }, [p.id, artifactKey])
+  useEffect(() => {
+    void api.projectContext(p.id).then(setUsage)
+  }, [p.id, p.updatedAt, p.instructions, p.files.length, p.memory?.length])
   const used = p.files.reduce((n, f) => n + f.size, 0)
+  const shownChats = chats.filter((s) => !chatFilter.trim() || s.title.toLowerCase().includes(chatFilter.trim().toLowerCase()))
 
   const update = async (patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd'>>): Promise<void> => props.onChanged(await api.updateProject(p.id, patch))
+
+  const projectMenu: MenuEntry[] = [
+    { key: 'pin', label: p.pinned ? 'Unpin from sidebar' : 'Pin to sidebar', onSelect: () => props.onPin(!p.pinned) },
+    { key: 'edit', label: 'Edit details', onSelect: () => setRenaming({ name: p.name, description: p.description }) },
+    { key: 'export', label: 'Export project…', hint: 'Chats, artifacts, knowledge and memory as a ZIP', onSelect: props.onExport },
+    'divider',
+    {
+      key: 'delete',
+      label: 'Delete project',
+      danger: true,
+      onSelect: () => {
+        if (!confirm(`Delete the project "${p.name}"? Its chats are kept and just leave the project.`)) return
+        void api.deleteProject(p.id).then(props.onDeleted)
+      }
+    }
+  ]
 
   return (
     <div className="page">
@@ -139,6 +261,11 @@ export function ProjectView(props: {
         </button>
         <span className="muted">/</span>
         <span className="crumb-current">{p.name}</span>
+        {p.pinned && (
+          <span className="muted" title="Pinned to the sidebar">
+            <Icon name="pin" size={14} />
+          </span>
+        )}
       </TitleBar>
       <div className="page-scroll">
         <div className="project-layout">
@@ -169,24 +296,12 @@ export function ProjectView(props: {
                   <h1>{p.name}</h1>
                   {p.description && <p className="muted">{p.description}</p>}
                 </div>
-                <Menu
-                  align="right"
-                  title="Project options"
-                  trigger={<span className="more-dots">⋯</span>}
-                  entries={[
-                    { key: 'edit', label: 'Edit details', onSelect: () => setRenaming({ name: p.name, description: p.description }) },
-                    'divider',
-                    {
-                      key: 'delete',
-                      label: 'Delete project',
-                      danger: true,
-                      onSelect: () => {
-                        if (!confirm(`Delete the project "${p.name}"? Its chats are kept and just leave the project.`)) return
-                        void api.deleteProject(p.id).then(props.onDeleted)
-                      }
-                    }
-                  ]}
-                />
+                <div className="row gap">
+                  <button className="btn ghost small-btn" onClick={props.onExport} title="Export this project">
+                    <Icon name="download" size={15} /> Export
+                  </button>
+                  <Menu align="right" title="Project options" trigger={<span className="more-dots">⋯</span>} entries={projectMenu} />
+                </div>
               </div>
             )}
 
@@ -212,10 +327,24 @@ export function ProjectView(props: {
             </div>
 
             <div className="project-chats">
+              {chats.length > 4 && (
+                <div className="side-search page-search">
+                  <Icon name="search" size={15} />
+                  <input placeholder={`Search ${chats.length} chats…`} value={chatFilter} onChange={(e) => setChatFilter(e.target.value)} />
+                </div>
+              )}
               {chats.length === 0 && <div className="muted small">No chats in this project yet.</div>}
-              {chats.map((s) => (
+              {shownChats.map((s) => (
                 <button key={s.id} className="project-chat" onClick={() => props.onOpenChat(s.id)}>
-                  <span className="project-chat-title">{s.title}</span>
+                  <span className="project-chat-title">
+                    {s.title}
+                    {s.artifactCount ? (
+                      <span className="muted" title={`${s.artifactCount} artifact${s.artifactCount === 1 ? '' : 's'}`}>
+                        {' '}
+                        <Icon name="file" size={13} />
+                      </span>
+                    ) : null}
+                  </span>
                   <span className="muted small">Last message {ago(s.updatedAt)}</span>
                 </button>
               ))}
@@ -223,6 +352,8 @@ export function ProjectView(props: {
           </section>
 
           <aside className="project-side">
+            <ContextCard usage={usage} />
+
             <div className="side-card">
               <div className="side-card-head">
                 <span>Instructions</span>
@@ -272,6 +403,22 @@ export function ProjectView(props: {
 
             <div className="side-card">
               <div className="side-card-head">
+                <span>
+                  Memory {p.memory?.length ? <span className="muted small">{p.memory.length}</span> : null}
+                </span>
+              </div>
+              <MemoryList
+                items={p.memory ?? []}
+                projectId={p.id}
+                enabled={props.memoryEnabled}
+                onEnable={props.onEnableMemory}
+                compact
+                onChange={(_items: MemoryItem[], project?: Project) => project && props.onChanged(project)}
+              />
+            </div>
+
+            <div className="side-card">
+              <div className="side-card-head">
                 <span>Knowledge</span>
                 <button
                   className="link-btn"
@@ -304,8 +451,37 @@ export function ProjectView(props: {
                   ))}
                 </ul>
               )}
-              {used > 0 && <div className="muted small">{kb(used)} of knowledge · sent with each chat in this project</div>}
+              {used > 0 && <div className="muted small">{kb(used)} of knowledge</div>}
               {notice && <div className="notice small">{notice}</div>}
+            </div>
+
+            <div className="side-card">
+              <div className="side-card-head">
+                <span>
+                  Artifacts {artifacts.length ? <span className="muted small">{artifacts.length}</span> : null}
+                </span>
+              </div>
+              {artifacts.length === 0 ? (
+                <div className="side-card-body muted">Pages, apps, diagrams and documents Claude makes in this project’s chats appear here.</div>
+              ) : (
+                <ul className="project-artifacts">
+                  {artifacts.slice(0, 12).map((a) => (
+                    <li key={a.sessionId + a.id}>
+                      <button onClick={() => props.onOpenArtifact(a.sessionId, a.id)} title={`Open in “${a.chatTitle}”`}>
+                        <Icon name={artifactIcon(a.type)} size={15} />
+                        <span className="pa-text">
+                          <span className="pa-title">{a.title}</span>
+                          <span className="muted small">
+                            {ARTIFACT_LABEL[a.type]}
+                            {a.versions > 1 ? ` · v${a.versions}` : ''} · {a.chatTitle}
+                          </span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                  {artifacts.length > 12 && <li className="muted small">…and {artifacts.length - 12} more (export the project to get them all)</li>}
+                </ul>
+              )}
             </div>
 
             <div className="side-card">

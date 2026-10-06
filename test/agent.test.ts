@@ -3,10 +3,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { PROJECT_KNOWLEDGE_LIMIT, SessionManager, systemAppend } from '../src/main/agent'
 import { ARTIFACT_TOOLS, createArtifactServer, renderArtifactPage } from '../src/main/artifacts'
+import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup } from '../src/main/exporter'
+import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
+import { createZip, readZip } from '../src/main/zip'
+import { DEFAULT_EXPORT_OPTIONS } from '../src/shared/types'
 import type { AgentEvent, ChatMessage, SessionMeta, AppSettings } from '../src/shared/types'
 import { DEFAULT_SETTINGS } from '../src/shared/types'
 import { applyEvent } from '../src/shared/reducer'
-import { countChanges, diffStrings, linesFromPatch } from '../src/renderer/src/diff'
+import { countChanges, diffStrings, linesFromPatch } from '../src/shared/diff'
 import assert from 'node:assert/strict'
 
 const sessions: SessionMeta[] = []
@@ -16,7 +20,10 @@ const store: any = {
   upsertSession: (m: SessionMeta) => { const i = sessions.findIndex((s) => s.id === m.id); i >= 0 ? (sessions[i] = m) : sessions.push(m) },
   loadHistory: () => [],
   saveHistory: () => {},
-  deleteSession: () => {}
+  deleteSession: () => {},
+  getGlobalMemory: () => [],
+  setGlobalMemory: () => {},
+  getProject: () => undefined
 }
 const events: AgentEvent[] = []
 let rendererView: ChatMessage[] = []
@@ -215,10 +222,151 @@ function projectPrompt() {
   const meta = mgr.create(undefined, 'p1')
   assert.equal(meta.projectId, 'p1'); assert.equal(meta.cwd, 'C:\\proj')
   const opts = (mgr as any).get(meta.id).buildOptions()
-  assert.equal(opts.mcpServers.artifacts?.type, 'sdk'); assert.deepEqual(opts.allowedTools, ARTIFACT_TOOLS)
+  assert.equal(opts.mcpServers.artifacts?.type, 'sdk'); assert.equal(opts.mcpServers.memory?.type, 'sdk')
+  assert.deepEqual(opts.allowedTools, [...ARTIFACT_TOOLS, ...MEMORY_TOOLS], 'artifacts and memory never prompt')
+  assert.deepEqual(opts.settings, { autoMemoryEnabled: false, enableArtifact: false }, "Claude Code's own memory files and cloud Artifact tool stay off")
   assert.match(opts.systemPrompt.append, /Answer in C\./)
   store.getSettings = st
   console.log('✓ projects: instructions + knowledge in the system prompt, size limit, project folder, artifacts tool')
+}
+
+/** In-memory stand-in for SecureStore, enough for memory/export/import. */
+function memStore() {
+  const s = { sessions: [] as SessionMeta[], projects: [] as any[], memory: [] as any[], hist: {} as any, arts: {} as any, files: {} as any }
+  const upsert = (list: any[], x: any) => {
+    const i = list.findIndex((y) => y.id === x.id)
+    i >= 0 ? (list[i] = x) : list.push(x)
+  }
+  return {
+    _s: s,
+    listSessions: () => [...s.sessions],
+    getSession: (id: string) => s.sessions.find((x) => x.id === id),
+    upsertSession: (m: SessionMeta) => upsert(s.sessions, m),
+    upsertSessions: (l: SessionMeta[]) => l.forEach((m) => upsert(s.sessions, m)),
+    loadHistory: (id: string) => s.hist[id] ?? [],
+    saveHistory: (id: string, h: any) => (s.hist[id] = h),
+    loadArtifacts: (id: string) => s.arts[id] ?? [],
+    saveArtifacts: (id: string, a: any) => (s.arts[id] = a),
+    listProjects: () => [...s.projects],
+    getProject: (id: string) => s.projects.find((p) => p.id === id),
+    upsertProject: (p: any) => upsert(s.projects, p),
+    loadProjectFiles: (id: string) => s.files[id] ?? {},
+    saveProjectFiles: (id: string, f: any) => (s.files[id] = f),
+    getGlobalMemory: () => s.memory,
+    setGlobalMemory: (m: any[]) => (s.memory = m)
+  }
+}
+
+async function memoryTool() {
+  const st: any = memStore()
+  st.upsertProject({ id: 'p1', name: 'Firmware', description: '', instructions: '', files: [], createdAt: 1, updatedAt: 1 })
+  const changed: (string | undefined)[] = []
+  const srv: any = createMemoryServer({ store: st, sessionId: 'c1', projectId: 'p1', onChange: (pid) => changed.push(pid) })
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  await srv.instance.connect(a)
+  const client = new Client({ name: 't', version: '1' })
+  await client.connect(b)
+  const call = async (name: string, args: any) => (await client.callTool({ name, arguments: args })) as any
+  await call('remember', { text: 'Boards use the F29 bootloader.' })
+  assert.equal(st.getProject('p1').memory.length, 1, 'defaults to project memory inside a project')
+  await call('remember', { text: 'User prefers short answers', scope: 'global' })
+  assert.equal(st.getGlobalMemory().length, 1)
+  const dup = await call('remember', { text: 'boards use the F29 bootloader' })
+  assert.match(dup.content[0].text, /Already in project memory/)
+  const id = st.getProject('p1').memory[0].id
+  assert.ok(!(await call('forget', { id })).isError)
+  assert.equal(st.getProject('p1').memory.length, 0)
+  assert.ok((await call('forget', { id: 'nope' })).isError)
+  assert.deepEqual(changed, ['p1', undefined, 'p1'])
+  // user edits from the app
+  addMemory(st, undefined, 'Lives in Bengaluru', 'you')
+  const gid = st.getGlobalMemory()[1].id
+  assert.ok(editMemory(st, undefined, gid, 'Works in Bengaluru'))
+  assert.equal(getMemory(st, undefined)[1].text, 'Works in Bengaluru')
+  assert.ok(removeMemory(st, undefined, gid))
+  // memory goes into the system prompt only when memory is on
+  const proj = { ...st.getProject('p1'), memory: [{ id: 'm1', text: 'Use C99', source: 'you', createdAt: 1 }] }
+  const withMem = systemAppend('', proj, { loadProjectFiles: () => ({}) }, { global: st.getGlobalMemory() })!
+  assert.match(withMem, /<memory>/); assert.match(withMem, /\[m1\] Use C99/); assert.match(withMem, /User prefers short answers/)
+  assert.ok(!(systemAppend('', proj, { loadProjectFiles: () => ({}) }, null) ?? '').includes('<memory>'))
+  console.log('✓ memory: project/global scope, duplicates, forget, user edits, system prompt')
+}
+
+function sampleData(st: any) {
+  const now = Date.now()
+  st.upsertProject({ id: 'p1', name: 'Weather app', description: 'Dashboards', instructions: 'Use TypeScript.', files: [{ id: 'f1', name: 'spec.md', size: 4, addedAt: now }], memory: [{ id: 'm1', text: 'API key lives in .env', source: 'claude', createdAt: now }], pinned: true, createdAt: now, updatedAt: now })
+  st.saveProjectFiles('p1', { f1: 'SPEC' })
+  st.setGlobalMemory([{ id: 'g1', text: 'Prefers dark mode', source: 'you', createdAt: now }])
+  const chat = (id: string, title: string, projectId?: string) => st.upsertSession({ id, sdkSessionId: 'sdk-' + id, title, cwd: 'C:/x', additionalDirs: [], model: '', permissionMode: 'default', projectId, createdAt: now, updatedAt: now, artifactCount: 1 })
+  chat('c1', 'Forecast page', 'p1')
+  chat('c2', 'Loose chat')
+  const hist = [
+    { id: 'u1', role: 'user', uuid: 'U1', forkAt: 'start', ts: now, parts: [{ kind: 'text', text: 'Make a page' }] },
+    { id: 'a1', role: 'assistant', ts: now, parts: [
+      { kind: 'thinking', text: 'secret plan' },
+      { kind: 'tool', toolUseId: 't1', name: 'Bash', input: { command: 'npm test' }, result: 'ok 3 tests', done: true },
+      { kind: 'tool', toolUseId: 't2', name: 'Edit', input: { file_path: 'a.ts', old_string: 'x', new_string: 'y' }, result: 'ok', done: true },
+      { kind: 'tool', toolUseId: 't3', name: 'mcp__artifacts__create_artifact', input: { id: 'page', type: 'html', title: 'Page' }, result: 'ok', done: true },
+      { kind: 'text', text: 'Done! Here is `code` with ``` fences.' }
+    ] }
+  ]
+  st.saveHistory('c1', hist)
+  st.saveHistory('c2', [hist[0]])
+  st.saveArtifacts('c1', [{ id: 'page', sessionId: 'c1', title: 'Page', type: 'html', versions: [{ content: '<h1>v1</h1>', ts: now }, { content: '<h1>v2</h1>', ts: now }], createdAt: now, updatedAt: now }])
+  st.saveArtifacts('c2', [{ id: 'app', sessionId: 'c2', title: 'App', type: 'react', versions: [{ content: 'export default () => null', ts: now }], createdAt: now, updatedAt: now }])
+}
+
+function exportAndImport() {
+  const st: any = memStore()
+  sampleData(st)
+  const base = { ...DEFAULT_EXPORT_OPTIONS }
+  // one chat → Markdown
+  const md = chatMarkdown(st.getSession('c1'), st.loadHistory('c1'), base, { project: st.getProject('p1'), artifacts: st.loadArtifacts('c1') })
+  assert.match(md, /^# Forecast page/); assert.match(md, /## You/); assert.match(md, /## Claude/)
+  assert.match(md, /_Ran a command, edited a\.ts_|_Edited a\.ts, ran a command_/); assert.ok(!md.includes('secret plan'), 'thinking off by default')
+  assert.match(md, /Created artifact:\*\* Page · Web page \(see Artifacts below\)/); assert.match(md, /## Artifacts[\s\S]*<h1>v2<\/h1>/)
+  assert.ok(!md.includes('<h1>v1</h1>'), 'latest version only by default')
+  const full = chatMarkdown(st.getSession('c1'), st.loadHistory('c1'), { ...base, tools: 'full', thinking: true, artifacts: 'all' }, { artifacts: st.loadArtifacts('c1') })
+  assert.match(full, /<summary>Ran a command<\/summary>[\s\S]*\$ npm test[\s\S]*ok 3 tests/); assert.match(full, /```diff\n-x\n\+y\n```/)
+  assert.match(full, /secret plan/); assert.match(full, /#### Version 1/)
+  // ZIP round trip
+  const z = readZip(createZip([{ name: 'a/ü.txt', data: 'héllo' }, { name: 'b.bin', data: Buffer.alloc(5000, 7) }]))
+  assert.deepEqual(z.map((e) => e.name), ['a/ü.txt', 'b.bin']); assert.equal(z[0].data.toString(), 'héllo'); assert.equal(z[1].data.length, 5000)
+  // everything → ZIP with README, project folder, knowledge, memory, linked artifacts, backup
+  const built = buildFullExport(st, base)
+  const names = built.entries.map((e) => e.name)
+  const root = built.name + '/'
+  for (const n of ['README.md', 'memory.md', 'projects/Weather app/README.md', 'projects/Weather app/knowledge/spec.md', 'projects/Weather app/memory.md', 'projects/Weather app/instructions.md', 'localclaude-backup.json'])
+    assert.ok(names.includes(root + n), 'missing ' + n)
+  assert.ok(names.some((n) => /projects\/Weather app\/chats\/\d{4}-\d\d-\d\d Forecast page\.md$/.test(n)))
+  assert.ok(names.some((n) => /artifacts\/.* Loose chat\/App\.preview\.html$/.test(n)), 'react artifacts get a browser preview page')
+  const chatMd = String(built.entries.find((e) => /Forecast page\.md$/.test(e.name))!.data)
+  assert.match(chatMd, /\[Page\]\(<\.\.\/artifacts\/\d{4}-\d\d-\d\d Forecast page\/Page\.html>\)/, 'chat links to its artifact file')
+  assert.deepEqual(built.stats, { chats: 2, artifacts: 2, files: 1 })
+  // import the backup into an empty store: everything comes back, nothing is duplicated on a second import
+  const zip = createZip(built.entries)
+  const fresh: any = memStore()
+  const r = importBackup(fresh, parseBackup(zip), new Set(['sdk-c2']))
+  assert.equal(r.ok, true); assert.equal(r.chats, 2); assert.equal(r.projects, 1); assert.equal(r.artifacts, 2); assert.equal(r.memory, 1)
+  assert.equal(r.withoutTranscript, 1, 'c1 has no transcript on this machine')
+  const c1 = fresh.getSession('c1')
+  assert.equal(c1.imported, true); assert.equal(c1.sdkSessionId, undefined); assert.equal(fresh.loadHistory('c1')[0].uuid, undefined)
+  assert.equal(fresh.getSession('c2').sdkSessionId, 'sdk-c2', 'transcript present: resume as normal')
+  assert.equal(fresh.loadProjectFiles('p1').f1, 'SPEC'); assert.equal(fresh.getProject('p1').memory[0].text, 'API key lives in .env')
+  const again = importBackup(fresh, parseBackup(zip), new Set())
+  assert.equal(again.chats, 0); assert.equal(again.skipped, 3)
+  assert.throws(() => parseBackup(Buffer.from('{"hello":1}')), /not a LocalClaude export/)
+  // an imported chat sends its earlier messages once, as context
+  const ctx = importedContext(c1, fresh.loadHistory('c1'))
+  assert.match(ctx, /<previous_conversation>[\s\S]*Make a page[\s\S]*<\/previous_conversation>/)
+  // project export
+  const pz = buildProjectExport(st, st.getProject('p1'), { ...base, backup: true })
+  assert.ok(pz.entries.some((e) => e.name === 'Weather app/README.md')); assert.equal(pz.stats.chats, 1)
+  const pb = parseBackup(createZip(pz.entries))
+  assert.equal(pb.sessions.length, 1); assert.equal(pb.memory.length, 0, 'project backups leave global memory out')
+  const readme = String(pz.entries.find((e) => e.name === 'Weather app/README.md')!.data)
+  assert.match(readme, /## Context/); assert.match(readme, /Use TypeScript\./); assert.match(readme, /API key lives in \.env/)
+  console.log('✓ export: chat Markdown (summary/full/thinking/versions), ZIP, project + full exports, backup import round trip')
 }
 
 function diffHelpers() {
@@ -258,6 +406,8 @@ await computerUseOption()
 diffHelpers()
 await artifactTool()
 projectPrompt()
+await memoryTool()
+exportAndImport()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

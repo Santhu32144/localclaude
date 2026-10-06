@@ -12,7 +12,10 @@ Everything runs and is stored **on this machine only**. Chats, settings and MCP 
 | Claude Code-style transcript | `● Update(file)` tool rows with `⎿` summaries, numbered diffs for every edit, Normal/Verbose view (Ctrl+O), animated working status |
 | Checkpoints & rewind | Hover a message → Rewind (or Esc Esc): restore the code, the conversation, or both to before that message |
 | Artifacts | Claude makes web pages, React apps, SVG, Mermaid diagrams, documents and code in a side panel with Preview/Code, version history, copy and download. Stored encrypted with the chat; previews run in a sandboxed frame (React/Mermaid load their libraries from public CDNs) |
-| Projects | Group chats with shared instructions, knowledge files (text, up to 5 MB each) and a working folder; added to every chat in the project |
+| Projects | Group chats with shared instructions, knowledge files (text, up to 5 MB each), memory and a working folder; added to every chat in the project. The project page shows how much of Claude's context it uses and lists every artifact from its chats |
+| Memory | Claude remembers useful facts across chats, per project or globally, and you can view, edit or delete them (project page, Settings → Memory & data). Encrypted like everything else |
+| Pinning & sidebar | Pin chats and projects; Pinned, Today, Yesterday and older groups collapse like the Claude app (older months start collapsed); chats with artifacts show a file icon |
+| Export & import | Export a chat as Markdown, or a project / everything as a ZIP of Markdown chats, artifacts, knowledge files, instructions, memory and a context summary. Import an export back, here or on another computer (Ctrl+Shift+E to export) |
 | Computer use | Optional: Claude sees your screen and uses the mouse and keyboard, like computer use in the Claude app (see below) |
 | Context meter | Ring in the composer shows how full the context window is, with a per-category breakdown |
 | Full Claude Code toolset | Read/edit/create files, run shell commands, search the web, fetch pages, subagents, to-do lists |
@@ -83,7 +86,8 @@ Anthropic currently lets the Agent SDK use your subscription's normal usage limi
 
 - **Storage:** `vault/` in the app-data folder (Settings → About shows it). Every file is AES-256-GCM encrypted with a key derived (scrypt) from the OS machine ID (Windows `MachineGuid`, Linux `/etc/machine-id`). On top of that, Electron safeStorage adds Windows DPAPI or the Linux keyring.
 - **Another PC:** the data refuses to open and shows a lock screen. The only option there is to erase it and start fresh.
-- **Your Claude account elsewhere:** these chats never reach claude.ai, so the Claude app on other devices can't see them.
+- **Your Claude account elsewhere:** these chats never reach claude.ai, so the Claude app on other devices can't see them. Claude Code's own cloud Artifact tool and its auto-memory files are turned off in LocalClaude's sessions; artifacts and memory stay in LocalClaude's encrypted storage.
+- **Exports are the way out:** an export is plain Markdown (and JSON for the backup), not encrypted, so treat the file like the chats themselves. Importing it on another computer is how you move your data; imported chats whose Claude Code transcript isn't there send their earlier messages to Claude as context on the next turn.
 - **Claude Code transcripts:** Claude Code also keeps its own plain-text session transcripts under `~/.claude/projects`, which is how chats resume. They're on this machine only, but they are not encrypted.
 - **Reinstalling the OS** changes the machine ID. The app then treats the PC as a new machine, so old chats are lost by design.
 

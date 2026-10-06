@@ -1,4 +1,4 @@
-import type { DiffHunk } from '../../shared/types'
+import type { DiffHunk } from './types'
 
 export interface DiffLine {
   kind: 'add' | 'del' | 'ctx' | 'gap'

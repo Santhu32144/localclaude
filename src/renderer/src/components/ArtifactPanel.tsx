@@ -1,18 +1,10 @@
 import { useEffect, useState } from 'react'
 import type { Artifact, ArtifactType } from '../../../shared/types'
+import { ARTIFACT_LABEL, artifactLang, fenced } from '../../../shared/format'
 import { api } from '../api'
 import { Icon } from './Icon'
 import { Markdown } from './Markdown'
 import { Menu } from './Menu'
-
-export const ARTIFACT_LABEL: Record<ArtifactType, string> = {
-  html: 'Web page',
-  react: 'Interactive app',
-  svg: 'Image',
-  mermaid: 'Diagram',
-  markdown: 'Document',
-  code: 'Code'
-}
 
 export function artifactIcon(type: ArtifactType): string {
   return type === 'markdown' ? 'file' : type === 'code' ? 'terminal' : type === 'svg' || type === 'mermaid' ? 'sparkle' : 'globe'
@@ -21,16 +13,6 @@ export function artifactIcon(type: ArtifactType): string {
 /** Types rendered in the sandboxed frame (they can run scripts). */
 const FRAMED: ArtifactType[] = ['html', 'react', 'svg', 'mermaid']
 
-function codeLang(a: Artifact): string {
-  return { html: 'html', react: 'jsx', svg: 'xml', mermaid: 'text', markdown: 'markdown', code: a.language ?? 'text' }[a.type]
-}
-
-/** A Markdown code fence long enough that backticks inside the content can't close it. */
-function fenced(content: string, lang: string): string {
-  const longest = Math.max(2, ...(content.match(/`+/g) ?? []).map((m) => m.length))
-  const fence = '`'.repeat(longest + 1)
-  return `${fence}${lang}\n${content}\n${fence}`
-}
 
 export interface PanelState {
   id: string | null
@@ -43,7 +25,6 @@ export function ArtifactPanel(props: {
   sessionId: string
   artifacts: Artifact[]
   state: PanelState
-  wcoSpace: boolean
   onState: (s: PanelState) => void
   onClose: () => void
 }) {
@@ -61,7 +42,6 @@ export function ArtifactPanel(props: {
           <button className="icon-btn" onClick={props.onClose} title="Close">
             <Icon name="x" size={16} />
           </button>
-          {props.wcoSpace && <div className="wco-space" />}
         </div>
         <div className="artifact-list">
           {props.artifacts.length === 0 && (
@@ -152,12 +132,11 @@ export function ArtifactPanel(props: {
         <button className="icon-btn" onClick={props.onClose} title="Close">
           <Icon name="x" size={16} />
         </button>
-        {props.wcoSpace && <div className="wco-space" />}
       </div>
       <div className="artifact-body">
         {view === 'code' ? (
           <div className="artifact-code">
-            <Markdown text={fenced(v.content, codeLang(a))} />
+            <Markdown text={fenced(v.content, artifactLang(a))} />
           </div>
         ) : framed ? (
           // No allow-same-origin: the page gets an opaque origin and can't reach the app, its storage or your files.

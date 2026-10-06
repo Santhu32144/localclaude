@@ -11,7 +11,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync }
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { readMachineId } from './machineId'
-import { AppSettings, Artifact, ChatMessage, DEFAULT_SETTINGS, LockStatus, Project, SessionMeta } from '../shared/types'
+import { AppSettings, Artifact, ChatMessage, DEFAULT_SETTINGS, LockStatus, MemoryItem, Project, SessionMeta } from '../shared/types'
 
 interface Vault {
   version: 1
@@ -19,6 +19,8 @@ interface Vault {
   settings: AppSettings
   sessions: SessionMeta[]
   projects?: Project[]
+  /** global memory (project memory lives on each project) */
+  memory?: MemoryItem[]
 }
 
 const MAGIC = Buffer.from('LCV1')
@@ -76,6 +78,7 @@ export class SecureStore {
       if (v.machineHash !== this.machineHash) throw new Error('machine mismatch')
       v.settings = { ...DEFAULT_SETTINGS, ...v.settings }
       this.vault = v
+      this.countArtifactsOnce()
     } catch {
       this.lock = {
         ...this.lock,
@@ -148,6 +151,15 @@ export class SecureStore {
   getSession(id: string): SessionMeta | undefined {
     return this.vault.sessions.find((s) => s.id === id)
   }
+  /** Save many chats with one vault write (used by import). */
+  upsertSessions(list: SessionMeta[]): void {
+    for (const meta of list) {
+      const i = this.vault.sessions.findIndex((s) => s.id === meta.id)
+      if (i >= 0) this.vault.sessions[i] = meta
+      else this.vault.sessions.push(meta)
+    }
+    this.saveVault()
+  }
   upsertSession(meta: SessionMeta): void {
     const i = this.vault.sessions.findIndex((s) => s.id === meta.id)
     if (i >= 0) this.vault.sessions[i] = meta
@@ -175,6 +187,26 @@ export class SecureStore {
   }
   saveHistory(id: string, messages: ChatMessage[]): void {
     this.atomicWrite(this.historyFile(id), this.encrypt(JSON.stringify(messages)))
+  }
+
+  // ---------- memory ----------
+  getGlobalMemory(): MemoryItem[] {
+    return this.vault.memory ?? []
+  }
+  setGlobalMemory(items: MemoryItem[]): void {
+    this.vault.memory = items
+    this.saveVault()
+  }
+
+  /** Chats saved before artifact counts existed get theirs once, for the sidebar icon. */
+  private countArtifactsOnce(): void {
+    let changed = false
+    for (const s of this.vault.sessions) {
+      if (s.artifactCount !== undefined) continue
+      s.artifactCount = existsSync(this.artifactsFile(s.id)) ? this.loadArtifacts(s.id).length : 0
+      changed = true
+    }
+    if (changed) this.saveVault()
   }
 
   // ---------- artifacts (one encrypted file per chat) ----------

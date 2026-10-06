@@ -10,12 +10,21 @@ import type {
   PermissionDecision,
   PermissionModeUI,
   Artifact,
+  ExportRequest,
+  ExportResult,
+  ImportResult,
+  MemoryItem,
   Project,
+  ProjectArtifactRef,
+  ProjectContextUsage,
   RewindPreview,
   RewindRequest,
   SendPayload,
   SessionMeta
 } from '../shared/types'
+
+/** Memory after a change, plus the updated project when it was project memory. */
+type MemoryState = { items: MemoryItem[]; project?: Project }
 
 const inv = <T>(ch: string, ...args: unknown[]): Promise<T> => ipcRenderer.invoke(ch, ...args) as Promise<T>
 
@@ -78,10 +87,24 @@ const api = {
 
   listProjects: () => inv<Project[]>('projects:list'),
   createProject: (input: { name: string; description?: string }) => inv<Project>('projects:create', input),
-  updateProject: (id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd'>>) => inv<Project>('projects:update', id, patch),
+  updateProject: (id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd' | 'pinned'>>) =>
+    inv<Project>('projects:update', id, patch),
   deleteProject: (id: string) => inv<void>('projects:delete', id),
   addProjectFiles: (id: string, paths: string[]) => inv<{ project: Project; skipped: string[] }>('projects:addFiles', id, paths),
   removeProjectFile: (id: string, fileId: string) => inv<Project>('projects:removeFile', id, fileId),
+  projectArtifacts: (id: string) => inv<ProjectArtifactRef[]>('projects:artifacts', id),
+  projectContext: (id: string) => inv<ProjectContextUsage | null>('projects:context', id),
+
+  /** Memory: projectId null = global memory */
+  globalMemory: () => inv<MemoryItem[]>('memory:global'),
+  addMemory: (projectId: string | null, text: string) => inv<MemoryState>('memory:add', projectId, text),
+  editMemory: (projectId: string | null, id: string, text: string) => inv<MemoryState>('memory:edit', projectId, id, text),
+  removeMemory: (projectId: string | null, id: string) => inv<MemoryState>('memory:remove', projectId, id),
+  clearMemory: (projectId: string | null) => inv<MemoryState>('memory:clear', projectId),
+
+  exportData: (req: ExportRequest) => inv<ExportResult>('export:run', req),
+  revealFile: (path: string) => inv<void>('export:reveal', path),
+  importData: () => inv<ImportResult>('import:run'),
   platform: process.platform
 }
 

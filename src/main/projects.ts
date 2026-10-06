@@ -22,10 +22,12 @@ export function createProject(store: SecureStore, input: { name: string; descrip
   return p
 }
 
-export function updateProject(store: SecureStore, id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd'>>): Project {
+export function updateProject(store: SecureStore, id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'instructions' | 'cwd' | 'pinned'>>): Project {
   const p = store.getProject(id)
   if (!p) throw new Error('Unknown project')
-  const next = { ...p, ...patch, updatedAt: Date.now() }
+  // Pinning doesn't count as an edit, so it doesn't change "updated … ago" or the sort order.
+  const pinOnly = Object.keys(patch).every((k) => k === 'pinned')
+  const next = { ...p, ...patch, updatedAt: pinOnly ? p.updatedAt : Date.now() }
   store.upsertProject(next)
   return next
 }

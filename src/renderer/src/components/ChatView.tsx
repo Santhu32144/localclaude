@@ -94,6 +94,7 @@ export function ChatView(props: {
   onRename: (title: string) => void
   onPin: (pinned: boolean) => void
   onDelete: () => void
+  onExport: () => void
 }) {
   const { meta, history, runtime } = props
   const [text, setText] = useState('')
@@ -236,6 +237,7 @@ export function ChatView(props: {
     },
     { key: 'pin', label: meta.pinned ? 'Unpin' : 'Pin', onSelect: () => props.onPin(!meta.pinned) },
     { key: 'rewind', label: 'Rewind…', hint: 'Esc Esc', disabled: !canRewind || busy, onSelect: () => setRewind({ messageId: null }) },
+    { key: 'export', label: 'Export…', hint: 'Markdown · Ctrl+Shift+E', onSelect: props.onExport },
     'divider',
     { section: 'Working folder' },
     { key: 'open', label: baseName(meta.cwd), hint: started ? 'Open' : 'Change', onSelect: () => (started ? void api.openPath(meta.cwd) : void changeFolder()) },
@@ -272,31 +274,16 @@ export function ChatView(props: {
   }))
 
   return (
-    <div className={'chat-shell' + (panel ? ' with-panel' : '')}>
-    <div
-      className={'chat' + (dragOver ? ' drag' : '')}
-      onDragOver={(e) => {
-        e.preventDefault()
-        setDragOver(true)
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault()
-        setDragOver(false)
-        const paths = Array.from(e.dataTransfer.files)
-          .map((f) => api.pathForFile(f))
-          .filter(Boolean)
-        if (paths.length) void addPaths(paths)
-      }}
-    >
+    // Like the Claude app: the top bar spans the window, and the artifact panel opens below it, beside the chat.
+    <div className="chat-shell">
       <header className="titlebar">
         {props.headerLeft}
         {props.project && (
           <>
-            <button className="link-btn crumb no-drag" onClick={() => props.onOpenProject(props.project!.id)} title="Open project">
+            <button className="link-btn crumb no-drag" onClick={() => props.onOpenProject(props.project!.id)} title={`Open project “${props.project.name}”`}>
               {props.project.name}
             </button>
-            <span className="muted">/</span>
+            <span className="muted crumb-sep">/</span>
           </>
         )}
         {renaming !== null ? (
@@ -347,254 +334,273 @@ export function ChatView(props: {
           >
             <Icon name="file" size={18} />
           </button>
-          <button className="pill-btn" onClick={() => void api.openPath(meta.cwd)} title={meta.cwd}>
+          <button className="pill-btn" onClick={() => void api.openPath(meta.cwd)} title={`Open ${meta.cwd}`}>
             <Icon name="folder" size={15} />
-            {baseName(meta.cwd)}
+            <span className="pill-label">{baseName(meta.cwd)}</span>
           </button>
         </div>
-        {!panel && <div className="wco-space" />}
+        <div className="wco-space" />
       </header>
 
-      <div
-        className="messages"
-        ref={listRef}
-        onScroll={(e) => {
-          const el = e.currentTarget
-          const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-          stick.current = bottom
-          if (bottom !== atBottom) setAtBottom(bottom)
-        }}
-      >
-        <div className="messages-inner">
-          {top.length === 0 && (
-            <div className="chat-empty">
-              <Spark size={40} className="welcome-spark" />
-              <h2>How can I help you today?</h2>
-              <p className="muted small">
-                Working in <code>{baseName(meta.cwd)}</code> · <code>/</code> commands · <code>@</code> files · <code>Shift+Tab</code> modes
-                {props.settings.computerUse ? ' · computer use on' : ''}
-              </p>
-            </div>
-          )}
-          {segments.map((seg, i) => {
-            if (seg.kind === 'user')
-              return <UserMessage key={seg.message.id} message={seg.message} onRewind={busy ? undefined : (id) => setRewind({ messageId: id })} />
-            const isLast = i === segments.length - 1
-            return (
-              <Turn
-                key={seg.key}
-                messages={seg.messages}
-                childrenOf={childrenOf}
-                live={busy && isLast}
-                mode={props.transcript}
-                artifactInfo={artifactInfo}
-                onOpenArtifact={(id) => setPanel({ id, version: null })}
-                footer={busy && isLast && !props.permission ? <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} /> : undefined}
-              />
-            )
-          })}
-          {busy && !props.permission && segments[segments.length - 1]?.kind !== 'turn' && (
-            <div className="turn">
-              <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} />
-            </div>
-          )}
-        </div>
-      </div>
+      <div className="chat-row">
+        <div
+          className={'chat' + (dragOver ? ' drag' : '')}
+          onDragOver={(e) => {
+            e.preventDefault()
+            setDragOver(true)
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault()
+            setDragOver(false)
+            const paths = Array.from(e.dataTransfer.files)
+              .map((f) => api.pathForFile(f))
+              .filter(Boolean)
+            if (paths.length) void addPaths(paths)
+          }}
+        >
 
-      <div className="composer-wrap">
-        {!atBottom && (
-          <button className="to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
-            <Icon name="arrowDown" size={16} />
-          </button>
-        )}
-        {props.permission && (
-          <div className="perm-dock">
-            <PermissionDialog key={props.permission.requestId} req={props.permission} onDone={props.onPermissionDone} />
-          </div>
-        )}
-
-        <div className={'composer mode-' + meta.permissionMode}>
-          {cmdMatches.length > 0 && (
-            <div className="cmd-popup">
-              {cmdMatches.map((c, i) => (
-                <button
-                  key={c.name}
-                  className={'cmd' + (i === cmdIndex % cmdMatches.length ? ' active' : '')}
-                  onMouseDown={(e) => {
-                    e.preventDefault()
-                    setText('/' + c.name + ' ')
-                  }}
-                >
-                  <span className="cmd-name">
-                    /{c.name}
-                    {c.argumentHint && <span className="muted"> {c.argumentHint}</span>}
-                  </span>
-                  <span className="cmd-desc">
-                    {runtime.init?.skills.includes(c.name) && <span className="tag">skill</span>}
-                    {c.description}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-          {attachments.length > 0 && (
-            <div className="attachments">
-              {attachments.map((a, i) => (
-                <div key={i} className="thumb">
-                  <img src={`data:${a.mediaType};base64,${a.base64}`} alt={a.name} />
-                  <button className="chip-x" onClick={() => setAttachments((x) => x.filter((_, j) => j !== i))}>
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="prompt-row">
-            <textarea
-              ref={taRef}
-              className="composer-input"
-              placeholder={busy ? 'Claude is working… (Esc to stop)' : top.length ? 'Reply' : 'How can I help you today?'}
-              value={text}
-              rows={1}
-              onChange={(e) => {
-                setText(e.target.value)
-                setCmdIndex(0)
-                const el = e.target
-                el.style.height = 'auto'
-                el.style.height = Math.min(el.scrollHeight, 260) + 'px'
-              }}
-              onPaste={async (e) => {
-                const files = Array.from(e.clipboardData.files)
-                if (!files.length) return
-                e.preventDefault()
-                const atts = (await Promise.all(files.map(fileToAttachment))).filter(Boolean) as Attachment[]
-                setAttachments((a) => [...a, ...atts])
-              }}
-              onKeyDown={(e) => {
-                if (cmdMatches.length) {
-                  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                    e.preventDefault()
-                    setCmdIndex((i) => i + (e.key === 'ArrowDown' ? 1 : cmdMatches.length - 1))
-                    return
-                  }
-                  if (e.key === 'Tab' && !e.shiftKey) {
-                    e.preventDefault()
-                    setText('/' + cmdMatches[cmdIndex % cmdMatches.length].name + ' ')
-                    return
-                  }
-                }
-                if (e.key === 'Tab' && e.shiftKey) {
-                  e.preventDefault()
-                  const i = CYCLE.indexOf(meta.permissionMode)
-                  setMode(CYCLE[(i + 1) % CYCLE.length])
-                  return
-                }
-                if (e.key === 'Escape') {
-                  e.preventDefault()
-                  if (busy) return void api.interrupt(meta.id)
-                  const now = Date.now()
-                  if (now - lastEsc.current < 600 && !text && canRewind) {
-                    lastEsc.current = 0
-                    setEscHint(false)
-                    setRewind({ messageId: null })
-                  } else {
-                    lastEsc.current = now
-                    if (text) setText('')
-                    else if (canRewind) {
-                      setEscHint(true)
-                      setTimeout(() => setEscHint(false), 1200)
-                    }
-                  }
-                } else if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault()
-                  const pick = cmdMatches[cmdIndex % (cmdMatches.length || 1)]
-                  if (pick && '/' + pick.name !== text.trim()) {
-                    setText('/' + pick.name + ' ')
-                    return
-                  }
-                  void send()
-                }
-              }}
-            />
-            {busy ? (
-              <button className="send stop" onClick={() => void api.interrupt(meta.id)} title="Stop (Esc)">
-                <Icon name="stop" size={14} />
-              </button>
-            ) : (
-              <button className="send" disabled={!text.trim() && !attachments.length} onClick={() => void send()} title="Send (Enter)">
-                <Icon name="enter" size={18} />
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="composer-below">
-          <button
-            className="icon-btn"
-            title="Attach files or images"
-            onClick={async () => {
-              const paths = await api.pickFiles()
-              if (paths.length) void addPaths(paths)
+          <div
+            className="messages"
+            ref={listRef}
+            onScroll={(e) => {
+              const el = e.currentTarget
+              const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+              stick.current = bottom
+              if (bottom !== atBottom) setAtBottom(bottom)
             }}
           >
-            <Icon name="plus" size={18} />
-          </button>
-          {runtime.init && <McpButton sessionId={meta.id} servers={runtime.mcp} onOpenSettings={() => props.onOpenSettings('tools')} />}
-          <div className="grow" />
-          <span className="disclaimer">{escHint ? 'Press Esc again to rewind' : 'Claude is AI and can make mistakes.'}</span>
-          <div className="grow" />
-          <ContextRing usage={runtime.context} />
-          <Menu
-            className="below-menu"
-            align="right"
-            direction="up"
-            title="Model and effort"
-            trigger={
-              <>
-                <span className="model-name">{modelLabel}</span>
-                {effortLabel && <span className="muted">{effortLabel}</span>}
-              </>
-            }
-            entries={modelMenu}
-            footer={
-              rl ? (
-                <span className={rl.status === 'allowed' ? 'muted' : rl.status === 'rejected' ? 'danger-text' : 'warn-text'}>
-                  {cap((rl.rateLimitType ?? 'usage').replace(/_/g, ' '))}
-                  {rl.utilization !== undefined && `: ${Math.round(rl.utilization * (rl.utilization <= 1 ? 100 : 1))}% used`}
-                  {rl.resetsAt && ` · resets ${resetLabel(rl.resetsAt)}`}
-                </span>
-              ) : undefined
-            }
-          />
-          <Menu
-            className={'below-menu mode-' + meta.permissionMode}
-            align="right"
-            direction="up"
-            title={mode.hint + ' (Shift+Tab to cycle)'}
-            trigger={<span>{mode.short}</span>}
-            entries={modeMenu}
-          />
-        </div>
-      </div>
+            <div className="messages-inner">
+              {top.length === 0 && (
+                <div className="chat-empty">
+                  <Spark size={40} className="welcome-spark" />
+                  <h2>How can I help you today?</h2>
+                  <p className="muted small">
+                    Working in <code>{baseName(meta.cwd)}</code> · <code>/</code> commands · <code>@</code> files · <code>Shift+Tab</code> modes
+                    {props.settings.computerUse ? ' · computer use on' : ''}
+                  </p>
+                </div>
+              )}
+              {segments.map((seg, i) => {
+                if (seg.kind === 'user')
+                  return <UserMessage key={seg.message.id} message={seg.message} onRewind={busy ? undefined : (id) => setRewind({ messageId: id })} />
+                const isLast = i === segments.length - 1
+                return (
+                  <Turn
+                    key={seg.key}
+                    messages={seg.messages}
+                    childrenOf={childrenOf}
+                    live={busy && isLast}
+                    mode={props.transcript}
+                    artifactInfo={artifactInfo}
+                    onOpenArtifact={(id) => setPanel({ id, version: null })}
+                    footer={busy && isLast && !props.permission ? <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} /> : undefined}
+                  />
+                )
+              })}
+              {busy && !props.permission && segments[segments.length - 1]?.kind !== 'turn' && (
+                <div className="turn">
+                  <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} />
+                </div>
+              )}
+            </div>
+          </div>
 
-      {rewind && (
-        <RewindDialog
-          sessionId={meta.id}
-          history={history}
-          messageId={rewind.messageId}
-          onClose={() => {
-            setRewind(null)
-            taRef.current?.focus()
-          }}
-          onRestored={(t) => {
-            setRewind(null)
-            if (t !== undefined) setText(t)
-            taRef.current?.focus()
-          }}
-        />
-      )}
-    </div>
-    {panel && <ArtifactPanel sessionId={meta.id} artifacts={props.artifacts} state={panel} wcoSpace onState={setPanel} onClose={() => setPanel(null)} />}
+          <div className="composer-wrap">
+            {!atBottom && (
+              <button className="to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
+                <Icon name="arrowDown" size={16} />
+              </button>
+            )}
+            {props.permission && (
+              <div className="perm-dock">
+                <PermissionDialog key={props.permission.requestId} req={props.permission} onDone={props.onPermissionDone} />
+              </div>
+            )}
+
+            <div className={'composer mode-' + meta.permissionMode}>
+              {cmdMatches.length > 0 && (
+                <div className="cmd-popup">
+                  {cmdMatches.map((c, i) => (
+                    <button
+                      key={c.name}
+                      className={'cmd' + (i === cmdIndex % cmdMatches.length ? ' active' : '')}
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        setText('/' + c.name + ' ')
+                      }}
+                    >
+                      <span className="cmd-name">
+                        /{c.name}
+                        {c.argumentHint && <span className="muted"> {c.argumentHint}</span>}
+                      </span>
+                      <span className="cmd-desc">
+                        {runtime.init?.skills.includes(c.name) && <span className="tag">skill</span>}
+                        {c.description}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {attachments.length > 0 && (
+                <div className="attachments">
+                  {attachments.map((a, i) => (
+                    <div key={i} className="thumb">
+                      <img src={`data:${a.mediaType};base64,${a.base64}`} alt={a.name} />
+                      <button className="chip-x" onClick={() => setAttachments((x) => x.filter((_, j) => j !== i))}>
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="prompt-row">
+                <textarea
+                  ref={taRef}
+                  className="composer-input"
+                  placeholder={busy ? 'Claude is working… (Esc to stop)' : top.length ? 'Reply' : 'How can I help you today?'}
+                  value={text}
+                  rows={1}
+                  onChange={(e) => {
+                    setText(e.target.value)
+                    setCmdIndex(0)
+                    const el = e.target
+                    el.style.height = 'auto'
+                    el.style.height = Math.min(el.scrollHeight, 260) + 'px'
+                  }}
+                  onPaste={async (e) => {
+                    const files = Array.from(e.clipboardData.files)
+                    if (!files.length) return
+                    e.preventDefault()
+                    const atts = (await Promise.all(files.map(fileToAttachment))).filter(Boolean) as Attachment[]
+                    setAttachments((a) => [...a, ...atts])
+                  }}
+                  onKeyDown={(e) => {
+                    if (cmdMatches.length) {
+                      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                        e.preventDefault()
+                        setCmdIndex((i) => i + (e.key === 'ArrowDown' ? 1 : cmdMatches.length - 1))
+                        return
+                      }
+                      if (e.key === 'Tab' && !e.shiftKey) {
+                        e.preventDefault()
+                        setText('/' + cmdMatches[cmdIndex % cmdMatches.length].name + ' ')
+                        return
+                      }
+                    }
+                    if (e.key === 'Tab' && e.shiftKey) {
+                      e.preventDefault()
+                      const i = CYCLE.indexOf(meta.permissionMode)
+                      setMode(CYCLE[(i + 1) % CYCLE.length])
+                      return
+                    }
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      if (busy) return void api.interrupt(meta.id)
+                      const now = Date.now()
+                      if (now - lastEsc.current < 600 && !text && canRewind) {
+                        lastEsc.current = 0
+                        setEscHint(false)
+                        setRewind({ messageId: null })
+                      } else {
+                        lastEsc.current = now
+                        if (text) setText('')
+                        else if (canRewind) {
+                          setEscHint(true)
+                          setTimeout(() => setEscHint(false), 1200)
+                        }
+                      }
+                    } else if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                      e.preventDefault()
+                      const pick = cmdMatches[cmdIndex % (cmdMatches.length || 1)]
+                      if (pick && '/' + pick.name !== text.trim()) {
+                        setText('/' + pick.name + ' ')
+                        return
+                      }
+                      void send()
+                    }
+                  }}
+                />
+                {busy ? (
+                  <button className="send stop" onClick={() => void api.interrupt(meta.id)} title="Stop (Esc)">
+                    <Icon name="stop" size={14} />
+                  </button>
+                ) : (
+                  <button className="send" disabled={!text.trim() && !attachments.length} onClick={() => void send()} title="Send (Enter)">
+                    <Icon name="enter" size={18} />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="composer-below">
+              <button
+                className="icon-btn"
+                title="Attach files or images"
+                onClick={async () => {
+                  const paths = await api.pickFiles()
+                  if (paths.length) void addPaths(paths)
+                }}
+              >
+                <Icon name="plus" size={18} />
+              </button>
+              {runtime.init && <McpButton sessionId={meta.id} servers={runtime.mcp} onOpenSettings={() => props.onOpenSettings('tools')} />}
+              <div className="grow" />
+              <span className="disclaimer">{escHint ? 'Press Esc again to rewind' : 'Claude is AI and can make mistakes.'}</span>
+              <div className="grow" />
+              <ContextRing usage={runtime.context} />
+              <Menu
+                className="below-menu"
+                align="right"
+                direction="up"
+                title="Model and effort"
+                trigger={
+                  <>
+                    <span className="model-name">{modelLabel}</span>
+                    {effortLabel && <span className="muted">{effortLabel}</span>}
+                  </>
+                }
+                entries={modelMenu}
+                footer={
+                  rl ? (
+                    <span className={rl.status === 'allowed' ? 'muted' : rl.status === 'rejected' ? 'danger-text' : 'warn-text'}>
+                      {cap((rl.rateLimitType ?? 'usage').replace(/_/g, ' '))}
+                      {rl.utilization !== undefined && `: ${Math.round(rl.utilization * (rl.utilization <= 1 ? 100 : 1))}% used`}
+                      {rl.resetsAt && ` · resets ${resetLabel(rl.resetsAt)}`}
+                    </span>
+                  ) : undefined
+                }
+              />
+              <Menu
+                className={'below-menu mode-' + meta.permissionMode}
+                align="right"
+                direction="up"
+                title={mode.hint + ' (Shift+Tab to cycle)'}
+                trigger={<span>{mode.short}</span>}
+                entries={modeMenu}
+              />
+            </div>
+          </div>
+
+          {rewind && (
+            <RewindDialog
+              sessionId={meta.id}
+              history={history}
+              messageId={rewind.messageId}
+              onClose={() => {
+                setRewind(null)
+                taRef.current?.focus()
+              }}
+              onRestored={(t) => {
+                setRewind(null)
+                if (t !== undefined) setText(t)
+                taRef.current?.focus()
+              }}
+            />
+          )}
+        </div>
+        {panel && <ArtifactPanel sessionId={meta.id} artifacts={props.artifacts} state={panel} onState={setPanel} onClose={() => setPanel(null)} />}
+      </div>
     </div>
   )
 }

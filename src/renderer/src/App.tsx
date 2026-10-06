@@ -3,6 +3,8 @@ import { applyEvent } from '../../shared/reducer'
 import type {
   AgentEvent,
   Artifact,
+  ExportScope,
+  MemoryItem,
   AppSettings,
   AuthStatus,
   ChatMessage,
@@ -22,6 +24,7 @@ import { applyFonts } from './fonts'
 import { ChatView } from './components/ChatView'
 import { LockScreen } from './components/LockScreen'
 import { LoginScreen } from './components/LoginScreen'
+import { ExportDialog } from './components/ExportDialog'
 import { ProjectView, ProjectsView } from './components/Projects'
 import type { TranscriptMode } from './components/MessageView'
 import { SettingsDialog } from './components/SettingsDialog'
@@ -122,6 +125,14 @@ export default function App() {
   const [artifacts, setArtifacts] = useState<Record<string, Artifact[]>>({})
   /** the artifact Claude touched most recently, so the chat can open it in the side panel */
   const [lastArtifact, setLastArtifact] = useState<{ sessionId: string; id: string; at: number } | null>(null)
+  const [globalMemory, setGlobalMemory] = useState<MemoryItem[]>([])
+  const [exportReq, setExportReq] = useState<{ scope: ExportScope; sessionId?: string; projectId?: string } | null>(null)
+  const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null)
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), toast.error ? 9000 : 6000)
+    return () => clearTimeout(t)
+  }, [toast])
   const loaded = useRef(new Set<string>())
   // back/forward through chats you opened, like the Claude app
   const nav = useRef<{ stack: string[]; i: number }>({ stack: [], i: -1 })
@@ -163,10 +174,11 @@ export default function App() {
     const l = await api.lockStatus()
     setLock(l)
     if (!l.ok) return
-    const [s, list, projs] = await Promise.all([api.getSettings(), api.listSessions(), api.listProjects()])
+    const [s, list, projs, memory] = await Promise.all([api.getSettings(), api.listSessions(), api.listProjects(), api.globalMemory()])
     setSettings(s)
     setSessions(list)
     setProjects(projs)
+    setGlobalMemory(memory)
     if (list.length) setActiveId((cur) => cur ?? list[0].id)
     if (list.length && nav.current.i < 0) nav.current = { stack: [list[0].id], i: 0 }
     void refreshAuth()
@@ -225,6 +237,12 @@ export default function App() {
             return { ...all, [e.sessionId]: i >= 0 ? list.map((a) => (a.id === e.artifact.id ? e.artifact : a)) : [...list, e.artifact] }
           })
           setLastArtifact({ sessionId: e.sessionId, id: e.artifact.id, at: Date.now() })
+          return
+        case 'project':
+          setProjects((list) => list.map((p) => (p.id === e.project.id ? e.project : p)))
+          return
+        case 'global-memory':
+          setGlobalMemory(e.items)
           return
         case 'account':
           setAuth((a) => (a ? { ...a, email: e.email ?? a.email, subscriptionType: e.subscriptionType ?? a.subscriptionType } : a))
@@ -294,6 +312,43 @@ export default function App() {
     setSessions((list) => list.map((s) => (s.id === id ? meta : s)))
   }, [])
 
+  const pinProject = useCallback(
+    async (id: string, pinned: boolean) => upsertProject(await api.updateProject(id, { pinned })),
+    [upsertProject]
+  )
+
+  const projectDeleted = useCallback((id: string) => {
+    setProjects((list) => list.filter((p) => p.id !== id))
+    setSessions((list) => list.map((s) => (s.projectId === id ? { ...s, projectId: undefined } : s)))
+  }, [])
+
+  /** Open a chat with one of its artifacts showing in the side panel. */
+  const openArtifact = useCallback(
+    (sessionId: string, artifactId: string) => {
+      setLastArtifact({ sessionId, id: artifactId, at: Date.now() })
+      openChat(sessionId)
+    },
+    [openChat]
+  )
+
+  const runImport = useCallback(async () => {
+    const r = await api.importData()
+    if (r.canceled) return
+    if (!r.ok) return setToast({ text: r.error ?? 'Import failed.', error: true })
+    const [list, projs, memory] = await Promise.all([api.listSessions(), api.listProjects(), api.globalMemory()])
+    setSessions(list)
+    setProjects(projs)
+    setGlobalMemory(memory)
+    const parts = [`${r.chats} chat${r.chats === 1 ? '' : 's'}`, `${r.projects} project${r.projects === 1 ? '' : 's'}`, `${r.artifacts} artifact${r.artifacts === 1 ? '' : 's'}`]
+    if (r.memory) parts.push(`${r.memory} memor${r.memory === 1 ? 'y' : 'ies'}`)
+    setToast({
+      text:
+        `Imported ${parts.join(', ')}.` +
+        (r.skipped ? ` Skipped ${r.skipped} already here.` : '') +
+        (r.withoutTranscript ? ` ${r.withoutTranscript} chat${r.withoutTranscript === 1 ? '' : 's'} will send ${r.withoutTranscript === 1 ? 'its' : 'their'} earlier messages to Claude as context.` : '')
+    })
+  }, [])
+
   const signOut = useCallback(async () => {
     await api.logout()
     setSettingsOpen(false)
@@ -323,11 +378,17 @@ export default function App() {
       } else if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
         stepNav(e.key === 'ArrowLeft' ? -1 : 1)
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === 'e') {
+        // export what's on screen: the chat, the project, or everything
+        e.preventDefault()
+        if (page.kind === 'project') setExportReq({ scope: 'project', projectId: page.id })
+        else if (page.kind === 'chat' && activeId) setExportReq({ scope: 'chat', sessionId: activeId })
+        else setExportReq({ scope: 'all' })
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [newChat, transcript, setTranscript, sidebar, stepNav])
+  }, [newChat, transcript, setTranscript, sidebar, stepNav, page, activeId])
 
   if (!lock) return <div className="splash">Opening…</div>
   if (!lock.ok)
@@ -378,7 +439,9 @@ export default function App() {
         overlay={sidebar.narrow}
         onCollapse={sidebar.toggle}
         sessions={sessions}
-        activeId={activeId}
+        projects={projects}
+        activeId={page.kind === 'chat' ? activeId : null}
+        activeProjectId={page.kind === 'project' ? page.id : null}
         runtime={runtime}
         pending={pendingBySession}
         auth={auth}
@@ -387,7 +450,15 @@ export default function App() {
         onBack={() => stepNav(-1)}
         onForward={() => stepNav(1)}
         onPin={(id, p) => void pinChat(id, p)}
-        projectsActive={page.kind !== 'chat'}
+        onExportChat={(id) => setExportReq({ scope: 'chat', sessionId: id })}
+        onOpenProject={(id) => {
+          setPage({ kind: 'project', id })
+          sidebar.close()
+        }}
+        onPinProject={(id, p) => void pinProject(id, p)}
+        onExportAll={() => setExportReq({ scope: 'all' })}
+        onImport={() => void runImport()}
+        projectsActive={page.kind === 'projects'}
         onProjects={() => {
           setPage({ kind: 'projects' })
           sidebar.close()
@@ -416,6 +487,9 @@ export default function App() {
               upsertProject(p)
               setPage({ kind: 'project', id: p.id })
             }}
+            onPin={(id, p) => void pinProject(id, p)}
+            onExport={(id) => setExportReq({ scope: 'project', projectId: id })}
+            onDeleted={projectDeleted}
           />
         ) : page.kind === 'project' && projects.some((p) => p.id === page.id) ? (
           <ProjectView
@@ -424,14 +498,18 @@ export default function App() {
             sessions={sessions}
             headerLeft={headerLeft}
             defaultCwd={settings.defaultCwd}
+            memoryEnabled={settings.memory}
+            onEnableMemory={() => void updateSettings({ memory: true })}
             onBack={() => setPage({ kind: 'projects' })}
             onChanged={upsertProject}
             onDeleted={() => {
-              setProjects((list) => list.filter((p) => p.id !== page.id))
-              setSessions((list) => list.map((s) => (s.projectId === page.id ? { ...s, projectId: undefined } : s)))
+              projectDeleted(page.id)
               setPage({ kind: 'projects' })
             }}
             onOpenChat={openChat}
+            onOpenArtifact={openArtifact}
+            onExport={() => setExportReq({ scope: 'project', projectId: page.id })}
+            onPin={(p) => void pinProject(page.id, p)}
             onStartChat={(text) =>
               void newChat(undefined, page.id).then((meta) => api.send({ sessionId: meta.id, text, attachments: [] }))
             }
@@ -461,6 +539,7 @@ export default function App() {
             onRename={(t) => void renameChat(active.id, t)}
             onPin={(p) => void pinChat(active.id, p)}
             onDelete={() => void deleteChat(active.id)}
+            onExport={() => setExportReq({ scope: 'chat', sessionId: active.id })}
           />
         ) : (
           <div className="empty-main">
@@ -483,7 +562,26 @@ export default function App() {
           onChange={updateSettings}
           onClose={() => setSettingsOpen(false)}
           onLogout={signOut}
+          globalMemory={globalMemory}
+          onGlobalMemory={setGlobalMemory}
+          onExportAll={() => setExportReq({ scope: 'all' })}
+          onImport={() => void runImport()}
         />
+      )}
+      {exportReq && (
+        <ExportDialog
+          scope={exportReq.scope}
+          sessionId={exportReq.sessionId}
+          projectId={exportReq.projectId}
+          sessions={sessions}
+          projects={projects}
+          onClose={() => setExportReq(null)}
+        />
+      )}
+      {toast && (
+        <div className={'toast' + (toast.error ? ' error' : '')} role="status" onClick={() => setToast(null)}>
+          {toast.text}
+        </div>
       )}
     </div>
   )

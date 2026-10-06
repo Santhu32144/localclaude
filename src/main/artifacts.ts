@@ -25,11 +25,11 @@ function short(s: string, n = 60): string {
   return s.length > n ? s.slice(0, n) + '…' : s
 }
 
-export function createArtifactServer(ctx: { sessionId: string; store: SecureStore; onChange: (a: Artifact) => void }) {
+export function createArtifactServer(ctx: { sessionId: string; store: SecureStore; onChange: (a: Artifact, count: number) => void }) {
   const load = (): Artifact[] => ctx.store.loadArtifacts(ctx.sessionId)
   const save = (list: Artifact[], a: Artifact): void => {
     ctx.store.saveArtifacts(ctx.sessionId, list)
-    ctx.onChange(a)
+    ctx.onChange(a, list.length)
   }
   const ok = (text: string) => ({ content: [{ type: 'text' as const, text }] })
   const fail = (text: string) => ({ content: [{ type: 'text' as const, text }], isError: true })
@@ -76,7 +76,9 @@ export function createArtifactServer(ctx: { sessionId: string; store: SecureStor
           list.push(a)
           save(list, a)
           return ok(`Created artifact "${a.title}" (${a.id}, version 1). The user can see it in the artifact panel.`)
-        }
+        },
+        // Loaded up front (not behind tool search) so Claude reaches for it like the Claude app does.
+        { alwaysLoad: true, searchHint: 'artifact web page app diagram document', annotations: { title: 'Create artifact' } }
       ),
       tool(
         'update_artifact',
@@ -108,7 +110,8 @@ export function createArtifactServer(ctx: { sessionId: string; store: SecureStor
           if (args.title) a.title = args.title
           save(list, a)
           return ok(`Updated "${short(a.title)}" to version ${a.versions.length}.`)
-        }
+        },
+        { alwaysLoad: true, searchHint: 'update edit artifact', annotations: { title: 'Update artifact' } }
       )
     ]
   })

@@ -2553,14 +2553,491 @@ button.chip:hover {
   .project-layout {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ---------- sidebar sections (collapsible, like the Claude app) ---------- */
+.side-section {
+  margin-bottom: 2px;
+}
+.group-row {
+  display: flex;
+  align-items: center;
+  padding-right: 4px;
+}
+.group-row .group-label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 14px 10px 6px;
+  border-radius: 6px;
+}
+.group-row .group-label:hover {
+  color: var(--text);
+}
+.group-row .group-label .chev-i {
+  opacity: 0;
+  transition: transform 0.15s, opacity 0.12s;
+}
+.group-row:hover .group-label .chev-i,
+.side-section.closed .group-label .chev-i {
+  opacity: 1;
+}
+.group-count {
+  font-size: 11px;
+  background: var(--hover);
+  border-radius: 999px;
+  padding: 0 7px;
+}
+.group-menu {
+  margin-top: 8px;
+}
+.group-menu > .menu-trigger {
+  color: var(--muted);
+  padding: 4px;
+  display: grid;
+  place-items: center;
+}
+.item-icon {
+  color: var(--muted);
+  display: inline-grid;
+  flex-shrink: 0;
+}
+.session-item:hover .item-icon {
+  display: none;
+}
+.item-lead {
+  color: var(--muted);
+  display: inline-grid;
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+.side-hint {
+  display: block;
+  margin: 10px 10px 4px;
+  font-size: 12px;
+  text-align: left;
+}
+
+/* ---------- memory ---------- */
+.memory {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.memory-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'text actions' 'meta actions';
+  column-gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+}
+.memory-list li:first-child {
+  border-top: 0;
+}
+.memory-list li > .input {
+  grid-column: 1 / -1;
+}
+.memory-text {
+  grid-area: text;
+  font-size: 14px;
+  word-break: break-word;
+}
+.memory-meta {
+  grid-area: meta;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.memory-actions {
+  grid-area: actions;
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.memory-list li:hover .memory-actions,
+.memory-actions:focus-within {
+  opacity: 1;
+}
+.memory-actions .icon-btn {
+  padding: 4px;
+}
+.memory-add {
+  display: flex;
+  gap: 6px;
+}
+.memory-add .input {
+  flex: 1;
+  min-width: 0;
+}
+.memory.compact .memory-add .btn {
+  padding: 5px 10px;
+}
+.memory-clear {
+  align-self: flex-start;
+  font-size: 12px;
+}
+
+/* ---------- export dialog ---------- */
+.dialog-card {
+  width: min(600px, calc(100vw - 32px));
+  max-height: calc(100vh - 80px);
+  overflow: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dialog-title {
+  font-weight: 600;
+  font-size: 16px;
+}
+.export-scopes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+.export-scopes .option {
+  min-height: 74px;
+  justify-content: flex-start;
+}
+.export-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.export-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+.choice {
+  display: inline-flex;
+  background: var(--hover);
+  border-radius: 9px;
+  padding: 2px;
+}
+.choice-item {
+  border: 0;
+  background: none;
+  font-size: 13px;
+  padding: 4px 11px;
+  border-radius: 7px;
+  color: var(--muted);
+}
+.choice-item.on {
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+.export-note {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.export-done {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.export-done .icon {
+  color: var(--ok);
+}
+
+/* ---------- toast ---------- */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  max-width: min(640px, calc(100vw - 32px));
+  background: var(--text);
+  color: var(--bg);
+  border-radius: 12px;
+  padding: 10px 16px;
+  font-size: 14px;
+  box-shadow: var(--shadow);
+  z-index: 90;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.toast.error {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ---------- project page additions ---------- */
+.project-card {
+  cursor: pointer;
+}
+.project-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.project-card-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.project-card-top .project-card-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-menu .menu-trigger {
+  padding: 0 6px;
+  color: var(--muted);
+}
+.sort-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.small-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 13.5px;
+}
+.context-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--hover);
+  overflow: hidden;
+}
+.context-bar .seg {
+  min-width: 0;
+}
+.context-bar .seg:not([style*='width: 0%']) {
+  min-width: 2px;
+}
+.instr {
+  background: var(--accent);
+}
+.know {
+  background: #6a9bd8;
+}
+.mem {
+  background: #9b7fd6;
+}
+.context-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--muted);
+}
+.context-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 4px;
+}
+.project-artifacts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.project-artifacts button {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 6px 4px;
+  border-radius: 8px;
+}
+.project-artifacts button:hover {
+  background: var(--hover);
+}
+.project-artifacts .icon {
+  color: var(--muted);
+  margin-top: 2px;
+}
+.pa-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pa-title {
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pa-text .small {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-chat-title .icon {
+  display: inline-block;
+  vertical-align: -2px;
+}
+.link-btn.danger-text {
+  color: var(--danger);
+}
+
+/* ---------- chat layout: full-width top bar, then the chat and the artifact panel side by side ---------- */
+.chat-shell {
+  flex-direction: column;
+  min-width: 0;
+}
+.chat-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  position: relative;
+  container: chatrow / inline-size;
+}
+.chat-row > .chat {
+  flex: 1;
+  min-width: 0;
+  container: chat / inline-size;
+}
+.artifact-panel {
+  width: min(50%, 760px);
+  min-width: 340px;
+}
+/* the panel no longer touches the window's top edge, so it isn't a drag area */
+.artifact-head,
+.artifact-head > * {
+  -webkit-app-region: no-drag;
+}
+/* When the chat and the panel don't both fit, the panel slides over the chat instead of squeezing it. */
+@container chatrow (max-width: 880px) {
   .artifact-panel {
     position: absolute;
-    inset: 0 0 0 auto;
-    width: min(100%, 640px);
-    z-index: 50;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    min-width: 0;
+    z-index: 30;
     box-shadow: var(--shadow);
   }
-  .chat-shell {
-    position: relative;
+}
+
+/* ---------- top bar: everything shrinks and truncates instead of spilling over ---------- */
+.titlebar {
+  min-width: 0;
+  container: titlebar / inline-size;
+}
+.titlebar .crumb {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 32%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.crumb-sep {
+  flex-shrink: 0;
+}
+.title-menu {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.title-menu > .menu-trigger {
+  max-width: 100%;
+  min-width: 0;
+}
+.title-menu .chat-title {
+  min-width: 0;
+}
+.title-menu .env,
+.title-menu > .menu-trigger > .icon {
+  flex-shrink: 0;
+}
+.titlebar > .grow {
+  min-width: 8px;
+}
+.title-actions {
+  flex-shrink: 0;
+}
+.pill-btn {
+  max-width: 220px;
+}
+.pill-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@container titlebar (max-width: 760px) {
+  .pill-label {
+    display: none;
   }
+  .pill-btn {
+    padding: 5px 8px;
+  }
+}
+@container titlebar (max-width: 540px) {
+  .titlebar .crumb,
+  .titlebar .crumb-sep {
+    display: none;
+  }
+}
+
+/* ---------- the row under the reply box ---------- */
+.below-menu {
+  flex-shrink: 0;
+}
+.below-menu > .menu-trigger {
+  white-space: nowrap;
+}
+.disclaimer {
+  min-width: 0;
+}
+@container chat (max-width: 560px) {
+  .disclaimer {
+    display: none;
+  }
+}
+.version-menu .menu-trigger .small {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }

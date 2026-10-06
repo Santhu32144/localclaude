@@ -26,6 +26,8 @@ export interface AppSettings {
   computerUse: boolean
   /** Claude can create artifacts (pages, apps, diagrams, documents) shown in a side panel */
   artifacts: boolean
+  /** Claude keeps a memory of useful facts across chats (per project, and global) */
+  memory: boolean
   /** Load ~/.claude (user) + project settings: CLAUDE.md, skills, slash commands, plugins, hooks */
   loadUserSettings: boolean
   loadProjectSettings: boolean
@@ -50,6 +52,10 @@ export interface SessionMeta {
   pinned?: boolean
   /** chat belongs to this project (instructions + knowledge are added to every turn) */
   projectId?: string
+  /** how many artifacts this chat has (shown as an icon in the sidebar) */
+  artifactCount?: number
+  /** restored from an export without its Claude Code transcript: the old messages are sent as context on the next turn */
+  imported?: boolean
   createdAt: number
   updatedAt: number
   /** UUID of the last transcript entry of the latest finished turn (rewind fork point) */
@@ -199,6 +205,8 @@ export type AgentEvent =
   | { type: 'mcp-status'; sessionId: string; servers: McpStatus[] }
   | { type: 'history-reset'; sessionId: string; history: ChatMessage[] }
   | { type: 'artifact'; sessionId: string; artifact: Artifact }
+  | { type: 'project'; project: Project }
+  | { type: 'global-memory'; items: MemoryItem[] }
 
 export interface AuthStatus {
   loggedIn: boolean
@@ -245,6 +253,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   chromeIntegration: false,
   computerUse: false,
   artifacts: true,
+  memory: true,
   loadUserSettings: true,
   loadProjectSettings: true,
   mcpServers: {},
@@ -292,6 +301,89 @@ export interface Project {
   /** working folder for new chats in this project (falls back to the default) */
   cwd?: string
   files: ProjectFile[]
+  /** facts Claude (or you) saved for this project */
+  memory?: MemoryItem[]
+  pinned?: boolean
   createdAt: number
   updatedAt: number
+}
+
+// ---------------------------------------------------------------- memory
+/** Something worth remembering in later chats, e.g. a preference or a project decision. */
+export interface MemoryItem {
+  id: string
+  text: string
+  /** who saved it */
+  source: 'claude' | 'you'
+  createdAt: number
+  updatedAt?: number
+  /** chat it came from, when Claude saved it */
+  sessionId?: string
+}
+
+/** An artifact from one of a project's chats (for the project page). */
+export interface ProjectArtifactRef {
+  sessionId: string
+  chatTitle: string
+  id: string
+  title: string
+  type: ArtifactType
+  versions: number
+  updatedAt: number
+}
+
+/** Approximate tokens a project adds to every chat in it. */
+export interface ProjectContextUsage {
+  instructions: number
+  knowledge: number
+  memory: number
+  total: number
+  /** knowledge is longer than the limit and gets cut off */
+  truncated: boolean
+}
+
+// ---------------------------------------------------------------- export / import
+export type ExportScope = 'chat' | 'project' | 'all'
+
+export interface ExportOptions {
+  /** what to include of Claude's tool use: nothing, one summary line per group, or every step with inputs and output */
+  tools: 'none' | 'summary' | 'full'
+  thinking: boolean
+  artifacts: 'latest' | 'all' | 'none'
+  /** project instructions, knowledge files and memory */
+  knowledge: boolean
+  /** add localclaude-backup.json so the export can be imported back into LocalClaude */
+  backup: boolean
+}
+
+export const DEFAULT_EXPORT_OPTIONS: ExportOptions = { tools: 'summary', thinking: false, artifacts: 'latest', knowledge: true, backup: true }
+
+export interface ExportRequest {
+  scope: ExportScope
+  sessionId?: string
+  projectId?: string
+  options: ExportOptions
+}
+
+export interface ExportResult {
+  ok: boolean
+  canceled?: boolean
+  error?: string
+  path?: string
+  chats: number
+  artifacts: number
+  files: number
+}
+
+export interface ImportResult {
+  ok: boolean
+  canceled?: boolean
+  error?: string
+  chats: number
+  projects: number
+  artifacts: number
+  memory: number
+  skipped: number
+  /** chats whose Claude Code transcript isn't on this machine: they continue with the old messages as context */
+  withoutTranscript: number
 }
