@@ -523,5 +523,86 @@ export const steps = [
       await c.page("__t.click(__t.byText('.mcp-form .btn', 'Cancel'))")
       await c.closeModal()
     }
+  },
+  {
+    name: 'an artifact that errors: Fix with Claude, and open it in the browser',
+    run: async (c) => {
+      await c.page("__t.click(__t.q('.side-new'))")
+      await c.send('make broken artifact', 'I made a page (it has a bug).')
+      await c.waitFor('the error', "__t.text('.artifact-error').includes('boom from the page')", 15000)
+      await c.shot('artifact-error')
+      await c.page(`__t.click(__t.q('.artifact-head button[title="Open in your browser"]'))`)
+      await c.until('opened in the browser', () => c.opened.some((u) => u.startsWith('file:') && decodeURIComponent(u).endsWith('Broken page.html')))
+      await c.page("__t.click(__t.byText('.artifact-error .btn', 'Fix with Claude'))")
+      await c.waitFor('asked Claude', "__t.qa('.msg-user').some((m) => m.innerText.includes('Broken page') && m.innerText.includes('boom from the page')) && !__t.q('.send.stop')", 15000)
+      await c.waitFor('error bar gone', "!__t.q('.artifact-error')")
+    }
+  },
+  {
+    name: 'the Artifacts page lists every artifact',
+    run: async (c) => {
+      await c.page("__t.click(__t.byText('.side-nav', 'Artifacts'))")
+      await c.waitFor('gallery', "__t.text('.page-head h1') === 'Artifacts' && __t.qa('.artifact-tile').length === 2")
+      await c.page("__t.click(__t.byText('.kind-chip', 'Apps'))")
+      await c.waitFor('no apps', "__t.qa('.artifact-tile').length === 0 && __t.text('.page-inner').includes('No artifacts match')")
+      await c.page("__t.click(__t.byText('.kind-chip', 'Web pages'))")
+      await c.page("__t.setValue(__t.q('.page-search input'), 'demo')")
+      await c.waitFor('one match', "__t.qa('.artifact-tile').length === 1 && __t.text('.artifact-tile').includes('Demo page')")
+      await c.shot('artifacts-page')
+      await c.page("__t.click(__t.q('.artifact-tile'))")
+      await c.waitFor('opened in its chat', "__t.text('.artifact-panel .artifact-title') === 'Demo page'")
+    }
+  },
+  {
+    name: 'select several chats: pin, move to a project, export, delete',
+    run: async (c) => {
+      for (const t of ['throwaway one', 'throwaway two']) {
+        await c.page("__t.click(__t.q('.side-new'))")
+        await c.send(t, 'Echo: ' + t)
+      }
+      await c.waitFor('titled', "__t.qa('.session-title').filter((e) => e.textContent.startsWith('Chat about throwaway')).length === 2")
+      const ctrlClick = (t) => `(() => { __t.qa('.session-item').find((e) => e.textContent.includes(${JSON.stringify(t)})).dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true })); return true })()`
+      await c.page(ctrlClick('Chat about throwaway one'))
+      await c.page(ctrlClick('Chat about throwaway two'))
+      await c.waitFor('two selected', "__t.text('.bulk-count') === '2 selected' && __t.qa('.session-item.selected').length === 2")
+      await c.shot('bulk-select')
+      await c.page(`__t.click(__t.q('.bulk-bar button[title="Pin"]'))`)
+      await c.waitFor('pinned', "__t.qa('.side-section').some((s) => s.textContent.includes('Pinned') && s.textContent.includes('throwaway one') && s.textContent.includes('throwaway two'))")
+      await c.page("__t.click(__t.q('.bulk-move .menu-trigger'))")
+      await c.menuItem('E2E project')
+      await c.waitFor('moved', "__t.text('.toast').includes('Moved 2 chats to “E2E project”')")
+      const zip = c.file('two-chats.zip')
+      c.answers.push(zip)
+      await c.page(`__t.click(__t.q('.bulk-bar button[title="Export…"]'))`)
+      await c.waitFor('export dialog', "__t.text('.export-dialog').includes('Selected chats')")
+      await c.page("__t.click(__t.byText('.export-dialog .btn', 'Export ZIP'))")
+      await c.waitFor('exported', "__t.text('.export-dialog').includes('Exported')")
+      if (c.read(zip).subarray(0, 2).toString() !== 'PK') throw new Error('not a ZIP file')
+      await c.page("__t.click(__t.byText('.export-dialog .btn', 'Done'))")
+      await c.page('window.confirm = () => true; true')
+      await c.page("__t.click(__t.q('.bulk-delete'))")
+      await c.waitFor('deleted', "!__t.qa('.session-title').some((e) => e.textContent.includes('throwaway')) && !__t.q('.bulk-bar')")
+    }
+  },
+  {
+    name: 'drag a chat onto a project',
+    run: async (c) => {
+      await c.page("__t.click(__t.q('.side-new'))")
+      await c.send('drag me please', 'Echo: drag me please')
+      await c.waitFor('titled', "__t.qa('.session-title').some((e) => e.textContent.includes('Chat about drag me'))")
+      await c.page("__t.click(__t.byText('.side-nav', 'Projects'))")
+      await c.waitFor('project cards', "!!__t.byText('.project-card', 'E2E project')")
+      await c.page(`(() => {
+        const item = __t.qa('.session-item').find((e) => e.textContent.includes('Chat about drag me'))
+        const card = __t.byText('.project-card', 'E2E project')
+        const dt = new DataTransfer()
+        item.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }))
+        card.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }))
+        card.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }))
+        return true
+      })()`)
+      await c.waitFor('moved', "__t.text('.toast').includes('Moved 1 chat to “E2E project”')")
+      await c.waitFor('the project has it', "__t.byText('.project-card', 'E2E project').textContent.includes('2 chats')")
+    }
   }
 ]

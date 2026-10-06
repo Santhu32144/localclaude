@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, ClipboardItem, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, Notification, protocol, screen, shell } from 'electron'
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { artifactExt, safeFileName } from '../shared/format'
 import {
   DEFAULT_EXPORT_OPTIONS,
@@ -19,6 +19,7 @@ import {
   type PermissionDecision,
   type PermissionModeUI,
   type Project,
+  type ProjectArtifactRef,
   type RewindRequest,
   type SendPayload,
   type SessionMeta,
@@ -38,7 +39,7 @@ import { VaultSync, activeVault, detectVaults, obsidianUri } from './obsidian'
 import { notificationFor } from './notify'
 import { generateTitle } from './titles'
 import { fitToScreens, loadWindowState, trackWindowState } from './windowState'
-import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, projectContext, readBackup } from './exporter'
+import { buildChatsExport, buildFullExport, buildProjectExport, chatMarkdown, importBackup, projectContext, readBackup } from './exporter'
 import { addMemory, editMemory, getMemory, removeMemory, setMemory } from './memory'
 import { addProjectFiles, addProjectFolder, createProject, removeProjectFile, removeProjectFolder, updateProject } from './projects'
 import { SecureStore } from './store'
@@ -230,16 +231,31 @@ function registerIpc(): void {
     const p = updateProject(store, id, patch)
     return Object.keys(patch).every((k) => k === 'pinned') ? p : projectChanged(p)
   })
-  // Artifacts from every chat in a project, newest first.
-  handle('projects:artifacts', (id: string) =>
+  // Artifacts from every chat (or a project's chats), newest first.
+  const artifactRefs = (projectId?: string): ProjectArtifactRef[] =>
     store
       .listSessions()
-      .filter((s) => s.projectId === id && s.artifactCount)
+      .filter((s) => s.artifactCount && (!projectId || s.projectId === projectId))
       .flatMap((s) =>
-        store.loadArtifacts(s.id).map((a) => ({ sessionId: s.id, chatTitle: s.title, id: a.id, title: a.title, type: a.type, versions: a.versions.length, updatedAt: a.updatedAt }))
+        store
+          .loadArtifacts(s.id)
+          .map((a) => ({ sessionId: s.id, chatTitle: s.title, projectId: s.projectId, id: a.id, title: a.title, type: a.type, versions: a.versions.length, updatedAt: a.updatedAt }))
       )
       .sort((a, b) => b.updatedAt - a.updatedAt)
-  )
+  handle('projects:artifacts', (id: string) => artifactRefs(id))
+  handle('artifacts:all', () => artifactRefs())
+  // A page you can open in your browser (React apps and diagrams load their libraries from the web).
+  handle('artifacts:openInBrowser', (sessionId: string, artifactId: string, version?: number) => {
+    const a = store.loadArtifacts(sessionId).find((x) => x.id === artifactId)
+    const v = a?.versions[version ?? a.versions.length - 1]
+    if (!a || !v) return false
+    const dir = join(app.getPath('temp'), 'localclaude-artifacts')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${safeFileName(a.title)}.html`)
+    writeFileSync(file, renderArtifactPage(a.type, v.content))
+    void shell.openExternal(pathToFileURL(file).href)
+    return true
+  })
   handle('projects:context', (id: string) => {
     const p = store.getProject(id)
     return p ? projectContext(p, store.loadProjectFiles(id)) : null
@@ -293,9 +309,11 @@ function registerIpc(): void {
       }
       const project = req.scope === 'project' && req.projectId ? store.getProject(req.projectId) : undefined
       if (req.scope === 'project' && !project) return { ok: false, error: 'Project not found', ...none }
-      const built = project ? buildProjectExport(store, project, opts) : buildFullExport(store, opts)
+      const some = req.scope === 'chats' ? (req.sessionIds ?? []) : null
+      if (some && !some.length) return { ok: false, error: 'No chats selected', ...none }
+      const built = some ? buildChatsExport(store, some, opts) : project ? buildProjectExport(store, project, opts) : buildFullExport(store, opts)
       const r = await dialog.showSaveDialog(win!, {
-        title: project ? 'Export project' : 'Export everything',
+        title: some ? 'Export chats' : project ? 'Export project' : 'Export everything',
         defaultPath: built.name + '.zip',
         filters: [{ name: 'ZIP archive', extensions: ['zip'] }]
       })

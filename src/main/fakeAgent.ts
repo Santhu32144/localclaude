@@ -107,7 +107,11 @@ export function fakeQuery({ prompt, options = {} }: { prompt: string | AsyncIter
       })
     }
     let reply = `Echo: ${text}` + (images ? ` (with ${images} image${images === 1 ? '' : 's'})` : '')
-    if (t.includes('make artifact')) {
+    if (t.includes('make broken artifact')) {
+      const input = { id: 'broken-page', type: 'html', title: 'Broken page', content: '<h1>Broken</h1><script>throw new Error("boom from the page")</script>' }
+      await callTool('mcp__artifacts__create_artifact', input, () => tool('artifacts', 'create_artifact', input))
+      reply = 'I made a page (it has a bug).'
+    } else if (t.includes('make artifact')) {
       await callTool('mcp__artifacts__create_artifact', { id: 'demo-page', type: 'html', title: 'Demo page', content: '<h1>Hello from the demo</h1>' }, () =>
         tool('artifacts', 'create_artifact', { id: 'demo-page', type: 'html', title: 'Demo page', content: '<h1>Hello from the demo</h1>' })
       )

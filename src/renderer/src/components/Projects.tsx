@@ -2,12 +2,13 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { ARTIFACT_LABEL } from '../../../shared/format'
 import type { MemoryItem, Project, ProjectArtifactRef, ProjectContextUsage, SessionMeta } from '../../../shared/types'
 import { api } from '../api'
+import { droppedChats, isChatDrag } from '../dnd'
 import { artifactIcon } from './ArtifactPanel'
 import { Icon } from './Icon'
 import { MemoryList } from './Memory'
 import { Menu, type MenuEntry } from './Menu'
 
-const ago = (ts: number): string => {
+export const ago = (ts: number): string => {
   const m = Math.round((Date.now() - ts) / 60000)
   if (m < 1) return 'just now'
   if (m < 60) return `${m} min ago`
@@ -22,7 +23,7 @@ const tokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10
 /** Context window the project's share is measured against. */
 const CONTEXT_WINDOW = 200_000
 
-function TitleBar({ left, children }: { left: ReactNode; children?: ReactNode }) {
+export function TitleBar({ left, children }: { left: ReactNode; children?: ReactNode }) {
   return (
     <header className="titlebar">
       {left}
@@ -43,8 +44,11 @@ export function ProjectsView(props: {
   onPin: (id: string, pinned: boolean) => void
   onExport: (id: string) => void
   onDeleted: (id: string) => void
+  /** chats dragged onto a project */
+  onDropChats: (projectId: string, ids: string[]) => void
 }) {
   const [creating, setCreating] = useState(false)
+  const [dropOn, setDropOn] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
   const [filter, setFilter] = useState('')
@@ -114,7 +118,25 @@ export function ProjectsView(props: {
             {shown.map((p) => {
               const chats = props.sessions.filter((s) => s.projectId === p.id).length
               return (
-                <div key={p.id} className="project-card" role="button" tabIndex={0} onClick={() => props.onOpen(p.id)} onKeyDown={(e) => e.key === 'Enter' && props.onOpen(p.id)}>
+                <div
+                  key={p.id}
+                  className={'project-card' + (dropOn === p.id ? ' drop-target' : '')}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => props.onOpen(p.id)}
+                  onKeyDown={(e) => e.key === 'Enter' && props.onOpen(p.id)}
+                  onDragOver={(e) => {
+                    if (!isChatDrag(e)) return
+                    e.preventDefault()
+                    setDropOn(p.id)
+                  }}
+                  onDragLeave={() => setDropOn((d) => (d === p.id ? null : d))}
+                  onDrop={(e) => {
+                    const ids = droppedChats(e)
+                    setDropOn(null)
+                    if (ids?.length) props.onDropChats(p.id, ids)
+                  }}
+                >
                   <div className="project-card-top">
                     <span className="project-card-name">{p.name}</span>
                     {p.pinned && (

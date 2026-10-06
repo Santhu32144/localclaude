@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { fenced } from '../../../shared/format'
 import { parsedInput } from '../../../shared/steps'
 import type { AppSettings, Artifact, Attachment, ChatMessage, GitStatus, ImageRef, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, SessionMeta } from '../../../shared/types'
 import type { SessionRuntime } from '../App'
@@ -816,7 +817,24 @@ export function ChatView(props: {
             />
           )}
         </div>
-        {panel && <ArtifactPanel sessionId={meta.id} artifacts={props.artifacts} state={panel} onState={setPanel} onClose={() => setPanel(null)} />}
+        {panel && (
+          <ArtifactPanel
+            sessionId={meta.id}
+            artifacts={props.artifacts}
+            state={panel}
+            onState={setPanel}
+            onClose={() => setPanel(null)}
+            busy={busy}
+            onFix={(title, error) => {
+              stick.current = true
+              void api.send({
+                sessionId: meta.id,
+                text: `The “${title}” artifact shows this error when it runs:\n\n${fenced(error, 'text')}\n\nPlease fix it.`,
+                attachments: []
+              })
+            }}
+          />
+        )}
         {filesOpen && !panel && (
           <FilesPanel files={files} cwd={meta.cwd} canUndo={canRewind && !busy} onUndo={() => setRewind({ messageId: null })} onClose={() => setFilesOpen(false)} />
         )}

@@ -407,6 +407,7 @@ export interface MemoryItem {
 export interface ProjectArtifactRef {
   sessionId: string
   chatTitle: string
+  projectId?: string
   id: string
   title: string
   type: ArtifactType
@@ -425,7 +426,7 @@ export interface ProjectContextUsage {
 }
 
 // ---------------------------------------------------------------- export / import
-export type ExportScope = 'chat' | 'project' | 'all'
+export type ExportScope = 'chat' | 'chats' | 'project' | 'all'
 
 export interface ExportOptions {
   /** what to include of Claude's tool use: nothing, one summary line per group, or every step with inputs and output */
@@ -443,6 +444,8 @@ export const DEFAULT_EXPORT_OPTIONS: ExportOptions = { tools: 'summary', thinkin
 export interface ExportRequest {
   scope: ExportScope
   sessionId?: string
+  /** scope 'chats': the chats you selected */
+  sessionIds?: string[]
   projectId?: string
   options: ExportOptions
 }

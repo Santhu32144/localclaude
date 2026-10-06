@@ -125,19 +125,28 @@ const jsString = (s: string): string => JSON.stringify(s).replace(/<\/(script)/g
 const BASE_STYLE = `<style>html,body{margin:0;background:#fff;color:#1f1e1d;font-family:system-ui,'Segoe UI',sans-serif}</style>`
 
 /** Builds the HTML page that previews an artifact inside the sandboxed panel frame. */
+/** Tells the panel when the page throws, so it can offer "Fix with Claude" (a few reports at most). */
+const REPORTER = `<script>(function(){var n=0;function r(m){if(n++>4)return;try{parent.postMessage({__lcArtifactError:String(m&&m.stack||m).slice(0,3000)},'*')}catch(e){}}window.__lcReport=r;window.addEventListener('error',function(e){r(e.error||e.message)});window.addEventListener('unhandledrejection',function(e){r(e.reason)})})()</script>`
+
+function withReporter(html: string): string {
+  if (/<head[\s>]/i.test(html)) return html.replace(/<head(\s[^>]*)?>/i, (m) => m + REPORTER)
+  if (/<html[\s>]/i.test(html)) return html.replace(/<html(\s[^>]*)?>/i, (m) => m + '<head>' + REPORTER + '</head>')
+  return REPORTER + html
+}
+
 export function renderArtifactPage(type: ArtifactType, content: string): string {
   switch (type) {
     case 'html':
-      return /<html[\s>]/i.test(content) ? content : `<!doctype html><html><head><meta charset="utf-8">${BASE_STYLE}</head><body>${content}</body></html>`
+      return /<html[\s>]/i.test(content) ? withReporter(content) : `<!doctype html><html><head><meta charset="utf-8">${REPORTER}${BASE_STYLE}</head><body>${content}</body></html>`
     case 'svg':
-      return `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#fff}body{display:grid;place-items:center}svg{max-width:100%;max-height:100vh}</style></head><body>${content}</body></html>`
+      return `<!doctype html><html><head><meta charset="utf-8">${REPORTER}<style>html,body{margin:0;height:100%;background:#fff}body{display:grid;place-items:center}svg{max-width:100%;max-height:100vh}</style></head><body>${content}</body></html>`
     case 'mermaid':
-      return `<!doctype html><html><head><meta charset="utf-8">${BASE_STYLE}<style>body{padding:16px;display:flex;justify-content:center}</style></head><body>
+      return `<!doctype html><html><head><meta charset="utf-8">${REPORTER}${BASE_STYLE}<style>body{padding:16px;display:flex;justify-content:center}</style></head><body>
 <pre class="mermaid">${esc(content)}</pre>
-<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,securityLevel:'strict'});</script>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:false,securityLevel:'strict'});mermaid.run({querySelector:'.mermaid'}).catch((e)=>window.__lcReport(e&&e.message||e));</script>
 </body></html>`
     case 'react':
-      return `<!doctype html><html><head><meta charset="utf-8">${BASE_STYLE}
+      return `<!doctype html><html><head><meta charset="utf-8">${REPORTER}${BASE_STYLE}
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
 <script type="importmap">{"imports":{
@@ -146,7 +155,7 @@ export function renderArtifactPage(type: ArtifactType, content: string): string 
 </head><body><div id="root"></div>
 <pre id="err" style="display:none;color:#b4372e;white-space:pre-wrap;padding:16px;font:13px ui-monospace,Consolas,monospace"></pre>
 <script type="module">
-const showError = (e) => { const el = document.getElementById('err'); el.style.display = 'block'; el.textContent = String(e && e.stack || e) }
+const showError = (e) => { const el = document.getElementById('err'); el.style.display = 'block'; el.textContent = String(e && e.stack || e); window.__lcReport(e) }
 window.addEventListener('error', (e) => showError(e.error || e.message))
 try {
   let code = Babel.transform(${jsString(content)}, { presets: [['react', { runtime: 'automatic' }]], filename: 'App.jsx' }).code

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
 import type { AuthStatus, ChatSearchHit, Project, SessionMeta } from '../../../shared/types'
 import { api } from '../api'
 import type { SessionRuntime } from '../App'
+import { droppedChats, isChatDrag, startChatDrag } from '../dnd'
 import { Icon } from './Icon'
 import { Menu, type MenuEntry } from './Menu'
 
@@ -87,6 +88,11 @@ export function Sidebar(props: {
   onSelect: (id: string) => void
   onNew: () => void
   onDelete: (id: string) => void
+  /** several chats at once (selected with Ctrl/Shift+click, or dragged onto a project) */
+  onDeleteChats: (ids: string[]) => void
+  onPinChats: (ids: string[], pinned: boolean) => void
+  onMoveChats: (ids: string[], projectId: string | undefined) => void
+  onExportChats: (ids: string[]) => void
   onRename: (id: string, title: string) => void
   onPin: (id: string, pinned: boolean) => void
   onExportChat: (id: string) => void
@@ -94,6 +100,8 @@ export function Sidebar(props: {
   onOpenSearchHit: (id: string, query: string) => void
   projectsActive: boolean
   onProjects: () => void
+  artifactsActive: boolean
+  onArtifacts: () => void
   onOpenProject: (id: string) => void
   onPinProject: (id: string, pinned: boolean) => void
   onExportAll: () => void
@@ -106,6 +114,11 @@ export function Sidebar(props: {
   const [draft, setDraft] = useState('')
   const [prefs, setPrefs] = useState(loadPrefs)
   const [hits, setHits] = useState<ChatSearchHit[]>([])
+  const [selected, setSelected] = useState<string[]>([])
+  const [selectMode, setSelectMode] = useState(false)
+  const anchor = useRef<string | null>(null)
+  /** the project a dragged chat is over */
+  const [dropOn, setDropOn] = useState<string | null>(null)
 
   // Full-text search inside messages, a moment after you stop typing.
   useEffect(() => {
@@ -155,6 +168,54 @@ export function Sidebar(props: {
   const shownIds = new Set([...pinnedChats.map((s) => s.id), ...groups.flatMap((g) => g[1].map((s) => s.id))])
   const messageHits = searching ? hits.filter((h) => !shownIds.has(h.sessionId)) : []
 
+  // selecting chats: Ctrl/Cmd+click picks one, Shift+click a range, Esc stops
+  const live = selected.filter((id) => props.sessions.some((s) => s.id === id))
+  const selecting = selectMode || live.length > 0
+  const clearSelection = (): void => {
+    setSelected([])
+    setSelectMode(false)
+  }
+  useEffect(() => {
+    if (!selecting) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      setSelected([])
+      setSelectMode(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selecting])
+  const order = [...(isOpen('Pinned') ? pinnedChats : []), ...groups.filter(([label]) => isOpen(label)).flatMap(([, items]) => items)].map((s) => s.id)
+  const clickChat = (e: MouseEvent, id: string): void => {
+    if (e.shiftKey && anchor.current) {
+      const a = order.indexOf(anchor.current)
+      const b = order.indexOf(id)
+      if (a >= 0 && b >= 0) {
+        const range = order.slice(Math.min(a, b), Math.max(a, b) + 1)
+        setSelected((cur) => [...new Set([...cur, ...range])])
+        return
+      }
+    }
+    anchor.current = id
+    if (e.ctrlKey || e.metaKey || selecting) setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]))
+    else props.onSelect(id)
+  }
+  const allPinned = live.length > 0 && live.every((id) => props.sessions.find((s) => s.id === id)?.pinned)
+  const anyInProject = live.some((id) => props.sessions.find((s) => s.id === id)?.projectId)
+  const dropProps = (projectId: string) => ({
+    onDragOver: (e: DragEvent) => {
+      if (!isChatDrag(e)) return
+      e.preventDefault()
+      setDropOn(projectId)
+    },
+    onDragLeave: () => setDropOn((d) => (d === projectId ? null : d)),
+    onDrop: (e: DragEvent) => {
+      const ids = droppedChats(e)
+      setDropOn(null)
+      if (ids?.length) props.onMoveChats(ids, projectId)
+    }
+  })
+
   const name = props.auth.email ? props.auth.email.split('@')[0] : 'You'
   const plan = props.auth.subscriptionType ? cap(props.auth.subscriptionType) : ''
   const projectName = (id?: string): string | undefined => (id ? props.projects.find((p) => p.id === id)?.name : undefined)
@@ -164,13 +225,18 @@ export function Sidebar(props: {
     const busy = rt?.status === 'running' || rt?.status === 'starting'
     const pend = props.pending[s.id]
     const proj = projectName(s.projectId)
+    const isSel = live.includes(s.id)
     return (
       <div
         key={s.id}
-        className={'session-item' + (s.id === props.activeId ? ' active' : '')}
-        onClick={() => props.onSelect(s.id)}
+        className={'session-item' + (s.id === props.activeId && !selecting ? ' active' : '') + (isSel ? ' selected' : '')}
+        onClick={(e) => clickChat(e, s.id)}
+        onMouseDown={(e) => e.shiftKey && e.preventDefault()}
+        draggable={editing !== s.id}
+        onDragStart={(e) => startChatDrag(e, isSel ? live : [s.id])}
         title={proj ? `${s.title}\nProject: ${proj}` : s.title}
       >
+        {selecting && <span className={'select-box' + (isSel ? ' on' : '')}>{isSel ? '✓' : ''}</span>}
         {editing === s.id ? (
           <input
             className="input rename"
@@ -235,9 +301,10 @@ export function Sidebar(props: {
   const projectItem = (p: Project) => (
     <div
       key={p.id}
-      className={'session-item project-item' + (p.id === props.activeProjectId ? ' active' : '')}
+      className={'session-item project-item' + (p.id === props.activeProjectId ? ' active' : '') + (dropOn === p.id ? ' drop-target' : '')}
       onClick={() => props.onOpenProject(p.id)}
       title={p.description || p.name}
+      {...dropProps(p.id)}
     >
       <span className="item-lead">
         <Icon name="project" size={15} />
@@ -258,6 +325,8 @@ export function Sidebar(props: {
   )
 
   const viewMenu: MenuEntry[] = [
+    { key: 'select', label: 'Select chats', hint: 'Ctrl+click', onSelect: () => setSelectMode(true) },
+    'divider',
     { key: 'collapse', label: 'Collapse all groups', onSelect: () => update({ ...prefs, collapsed: Object.fromEntries(['Pinned', ...groups.map((g) => g[0])].map((l) => [l, true])) }) },
     { key: 'expand', label: 'Expand all groups', onSelect: () => update({ ...prefs, collapsed: Object.fromEntries(['Pinned', ...groups.map((g) => g[0])].map((l) => [l, false])) }) },
     'divider',
@@ -280,6 +349,7 @@ export function Sidebar(props: {
           entries={[
             { key: 'new', label: 'New chat', hint: 'Ctrl+N', onSelect: props.onNew },
             { key: 'projects', label: 'Projects', onSelect: props.onProjects },
+            { key: 'artifacts', label: 'Artifacts', onSelect: props.onArtifacts },
             'divider',
             { key: 'export', label: 'Export all chats…', hint: 'Markdown + artifacts + projects, as a ZIP', onSelect: props.onExportAll },
             { key: 'import', label: 'Import an export or backup…', onSelect: props.onImport },
@@ -317,6 +387,10 @@ export function Sidebar(props: {
       <button className={'side-nav' + (props.projectsActive ? ' active' : '')} onClick={props.onProjects}>
         <Icon name="project" size={16} />
         Projects
+      </button>
+      <button className={'side-nav' + (props.artifactsActive ? ' active' : '')} onClick={props.onArtifacts}>
+        <Icon name="file" size={16} />
+        Artifacts
       </button>
 
       <nav className="session-list">
@@ -360,6 +434,47 @@ export function Sidebar(props: {
           </button>
         )}
       </nav>
+
+      {selecting && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{live.length ? `${live.length} selected` : 'Click chats to select'}</span>
+          <span className="grow" />
+          <button className="icon-btn" title={allPinned ? 'Unpin' : 'Pin'} disabled={!live.length} onClick={() => props.onPinChats(live, !allPinned)}>
+            <Icon name="pin" size={15} />
+          </button>
+          <Menu
+            className="bulk-move"
+            align="right"
+            direction="up"
+            title="Move to a project"
+            trigger={<Icon name="project" size={15} />}
+            entries={[
+              { section: 'Move to project' },
+              ...props.projects.map((p) => ({ key: p.id, label: p.name, disabled: !live.length, onSelect: () => props.onMoveChats(live, p.id) })),
+              ...(props.projects.length ? [] : [{ key: 'none', label: 'No projects yet', disabled: true, onSelect: () => {} }]),
+              ...(anyInProject ? (['divider', { key: 'out', label: 'Remove from project', onSelect: () => props.onMoveChats(live, undefined) }] as MenuEntry[]) : [])
+            ]}
+          />
+          <button className="icon-btn" title="Export…" disabled={!live.length} onClick={() => props.onExportChats(live)}>
+            <Icon name="download" size={15} />
+          </button>
+          <button
+            className="icon-btn bulk-delete"
+            title="Delete"
+            disabled={!live.length}
+            onClick={() => {
+              if (!confirm(`Delete ${live.length} chat${live.length === 1 ? '' : 's'}? This removes them from LocalClaude.`)) return
+              props.onDeleteChats(live)
+              clearSelection()
+            }}
+          >
+            <Icon name="trash" size={15} />
+          </button>
+          <button className="icon-btn" title="Done (Esc)" onClick={clearSelection}>
+            <Icon name="x" size={15} />
+          </button>
+        </div>
+      )}
 
       <div className="side-account">
         <Menu

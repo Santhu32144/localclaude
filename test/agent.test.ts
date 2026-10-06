@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { PROJECT_KNOWLEDGE_LIMIT, SessionManager, systemAppend } from '../src/main/agent'
 import { ARTIFACT_TOOLS, createArtifactServer, renderArtifactPage } from '../src/main/artifacts'
 import { backupDue, backupFileName, backupZip, createBackup, decryptBackup, encryptBackup, isEncryptedBackup, pruneBackups, writeBackupTo } from '../src/main/backup'
-import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup, readBackup } from '../src/main/exporter'
+import { buildChatsExport, buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup, readBackup } from '../src/main/exporter'
 import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
 import { createZip, readZip } from '../src/main/zip'
 import { branchName, createWorktree, gitStatus } from '../src/main/git'
@@ -229,6 +229,10 @@ async function artifactTool() {
   assert.equal(saved.chat1[0].versions.length, 3); assert.equal(saved.chat1[0].title, 'Todos')
   assert.match(renderArtifactPage('react', 'export default function A(){}'), /importmap/)
   assert.match(renderArtifactPage('svg', '<svg/>'), /<svg\/>/)
+  // every preview tells the panel when it throws (for "Fix with Claude")
+  for (const type of ['html', 'svg', 'react', 'mermaid'] as const) assert.match(renderArtifactPage(type, 'x'), /__lcArtifactError/, type)
+  assert.match(renderArtifactPage('html', '<html><head><title>t</title></head><body>hi</body></html>'), /^<html><head><script>\(function\(\)\{var n=0;[\s\S]*<title>t<\/title>/)
+  assert.match(renderArtifactPage('mermaid', 'graph TD; A-->B'), /mermaid\.run\(/)
   assert.ok(!renderArtifactPage('mermaid', 'graph TD; A-->B</script>').includes('A-->B</script>'), 'mermaid source is escaped')
   console.log('✓ artifacts: create, edit by snippet, rewrite, versions, errors, preview pages')
 }
@@ -406,6 +410,11 @@ function exportAndImport() {
   assert.ok(pz.entries.some((e) => e.name === 'Weather app/README.md')); assert.equal(pz.stats.chats, 1)
   const pb = parseBackup(createZip(pz.entries))
   assert.equal(pb.sessions.length, 1); assert.equal(pb.memory.length, 0, 'project backups leave global memory out')
+  // chats you selected: just those, and a backup of just those
+  const some = buildChatsExport(st, ['c2', 'missing'], base)
+  assert.equal(some.stats.chats, 1); assert.ok(some.entries.some((e) => /chats\/\d{4}-\d\d-\d\d Loose chat\.md$/.test(e.name)))
+  const sb = parseBackup(createZip(some.entries))
+  assert.deepEqual(sb.sessions.map((s) => s.meta.id), ['c2']); assert.equal(sb.projects.length, 0); assert.equal(sb.memory.length, 0)
   const readme = String(pz.entries.find((e) => e.name === 'Weather app/README.md')!.data)
   assert.match(readme, /## Context/); assert.match(readme, /Use TypeScript\./); assert.match(readme, /API key lives in \.env/)
   console.log('✓ export: chat Markdown (summary/full/thinking/versions), ZIP, project + full exports, backup import round trip')

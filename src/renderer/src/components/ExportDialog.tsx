@@ -28,6 +28,8 @@ function Choice<T extends string>(props: { value: T; options: { value: T; label:
 export function ExportDialog(props: {
   scope: ExportScope
   sessionId?: string
+  /** chats you selected in the sidebar */
+  sessionIds?: string[]
   projectId?: string
   sessions: SessionMeta[]
   projects: Project[]
@@ -62,7 +64,9 @@ export function ExportDialog(props: {
   }
 
   const chatsIn = (pid?: string): number => props.sessions.filter((s) => s.projectId === pid).length
+  const picked = props.sessionIds ?? []
   const scopes: { value: ExportScope; label: string; hint: string }[] = [
+    ...(picked.length ? [{ value: 'chats' as const, label: 'Selected chats', hint: `${picked.length} chat${picked.length === 1 ? '' : 's'}, as a ZIP` }] : []),
     ...(chat ? [{ value: 'chat' as const, label: 'This chat', hint: `“${chat.title}” as one Markdown file` }] : []),
     ...(project ? [{ value: 'project' as const, label: 'This project', hint: `“${project.name}”: ${chatsIn(project.id)} chats, knowledge and memory, as a ZIP` }] : []),
     { value: 'all', label: 'Everything', hint: `All ${props.sessions.length} chats and ${props.projects.length} projects, as a ZIP` }
@@ -71,7 +75,7 @@ export function ExportDialog(props: {
   const run = async (): Promise<void> => {
     setBusy(true)
     setResult(null)
-    const r = await api.exportData({ scope, sessionId: chat?.id, projectId: project?.id, options: opts })
+    const r = await api.exportData({ scope, sessionId: chat?.id, sessionIds: picked, projectId: project?.id, options: opts })
     setBusy(false)
     if (!r.canceled) setResult(r)
   }

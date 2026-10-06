@@ -3644,3 +3644,118 @@ button.chip:hover {
 .link-btn.small {
   font-size: 12.5px;
 }
+
+/* ---------- artifacts page, preview errors ---------- */
+.kind-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 4px;
+}
+.kind-chip {
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.kind-chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.kind-chip.on {
+  background: var(--active);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.artifact-tile .artifact-card-icon {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+.artifact-tile-chat {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* the error bar sits above the preview */
+.artifact-body {
+  flex-direction: column;
+}
+.artifact-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(180, 55, 46, 0.08);
+}
+.artifact-error-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+.artifact-error-text pre {
+  margin: 4px 0 0;
+  max-height: 72px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* ---------- selecting chats, dragging them onto projects ---------- */
+.select-box {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin-right: 8px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  line-height: 1;
+  color: #fff;
+}
+.select-box.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.session-item.selected {
+  background: var(--accent-soft);
+}
+.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  background: var(--accent-soft) !important;
+}
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0 8px 6px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+}
+.bulk-count {
+  font-size: 13px;
+  white-space: nowrap;
+}
+.bulk-bar .icon-btn {
+  padding: 5px;
+}
+.bulk-delete:hover:not(:disabled) {
+  color: var(--danger);
+}
+.bulk-move > .menu-trigger {
+  display: inline-flex;
+  padding: 5px;
+  border-radius: 6px;
+}

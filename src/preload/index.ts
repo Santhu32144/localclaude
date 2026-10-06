@@ -113,6 +113,8 @@ const api = {
   saveAllToVault: () => inv<number>('obsidian:saveAll'),
   removeProjectFile: (id: string, fileId: string) => inv<Project>('projects:removeFile', id, fileId),
   projectArtifacts: (id: string) => inv<ProjectArtifactRef[]>('projects:artifacts', id),
+  allArtifacts: () => inv<ProjectArtifactRef[]>('artifacts:all'),
+  openArtifactInBrowser: (sessionId: string, artifactId: string, version?: number) => inv<boolean>('artifacts:openInBrowser', sessionId, artifactId, version),
   projectContext: (id: string) => inv<ProjectContextUsage | null>('projects:context', id),
 
   /** Memory: projectId null = global memory */

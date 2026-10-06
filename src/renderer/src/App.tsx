@@ -22,6 +22,7 @@ import type {
 } from '../../shared/types'
 import { api } from './api'
 import { applyFonts } from './fonts'
+import { ArtifactsView } from './components/ArtifactsView'
 import { ChatView } from './components/ChatView'
 import { LockScreen } from './components/LockScreen'
 import { LoginScreen } from './components/LoginScreen'
@@ -122,13 +123,13 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState<false | string>(false)
   const [transcript, setTranscriptState] = useState<TranscriptMode>(loadTranscriptMode)
   const sidebar = useSidebar()
-  const [page, setPage] = useState<{ kind: 'chat' } | { kind: 'projects' } | { kind: 'project'; id: string }>({ kind: 'chat' })
+  const [page, setPage] = useState<{ kind: 'chat' } | { kind: 'projects' } | { kind: 'artifacts' } | { kind: 'project'; id: string }>({ kind: 'chat' })
   const [projects, setProjects] = useState<Project[]>([])
   const [artifacts, setArtifacts] = useState<Record<string, Artifact[]>>({})
   /** the artifact Claude touched most recently, so the chat can open it in the side panel */
   const [lastArtifact, setLastArtifact] = useState<{ sessionId: string; id: string; at: number } | null>(null)
   const [globalMemory, setGlobalMemory] = useState<MemoryItem[]>([])
-  const [exportReq, setExportReq] = useState<{ scope: ExportScope; sessionId?: string; projectId?: string } | null>(null)
+  const [exportReq, setExportReq] = useState<{ scope: ExportScope; sessionId?: string; sessionIds?: string[]; projectId?: string } | null>(null)
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null)
   /** ask the open chat to show its find bar */
   const [findRequest, setFindRequest] = useState<{ query: string; n: number } | null>(null)
@@ -321,6 +322,41 @@ export default function App() {
     [upsertProject]
   )
 
+  // several chats at once: from selecting them in the sidebar, or dragging them onto a project
+  const moveChats = useCallback(
+    async (ids: string[], projectId: string | undefined) => {
+      for (const id of ids) await moveChat(id, projectId)
+      const to = projects.find((p) => p.id === projectId)?.name
+      setToast({ text: `${to ? 'Moved' : 'Removed'} ${ids.length} chat${ids.length === 1 ? '' : 's'} ${to ? `to “${to}”` : 'from their project'}.` })
+    },
+    [moveChat, projects]
+  )
+  const pinChats = useCallback(
+    async (ids: string[], pinned: boolean) => {
+      for (const id of ids) await pinChat(id, pinned)
+    },
+    [pinChat]
+  )
+  const deleteChats = useCallback(
+    async (ids: string[]) => {
+      for (const id of ids) {
+        await api.deleteSession(id)
+        loaded.current.delete(id)
+      }
+      const gone = new Set(ids)
+      setSessions((list) => {
+        const next = list.filter((s) => !gone.has(s.id))
+        if (activeId && gone.has(activeId)) setActiveId(next[0]?.id ?? null)
+        nav.current.stack = nav.current.stack.filter((x) => !gone.has(x))
+        nav.current.i = Math.min(nav.current.i, nav.current.stack.length - 1)
+        return next
+      })
+      setPermissions((p) => p.filter((x) => !gone.has(x.sessionId)))
+      setToast({ text: `Deleted ${ids.length} chat${ids.length === 1 ? '' : 's'}.` })
+    },
+    [activeId]
+  )
+
   const projectDeleted = useCallback((id: string) => {
     setProjects((list) => list.filter((p) => p.id !== id))
     setSessions((list) => list.map((s) => (s.projectId === id ? { ...s, projectId: undefined } : s)))
@@ -489,6 +525,11 @@ export default function App() {
           setPage({ kind: 'projects' })
           sidebar.close()
         }}
+        artifactsActive={page.kind === 'artifacts'}
+        onArtifacts={() => {
+          setPage({ kind: 'artifacts' })
+          sidebar.close()
+        }}
         onSignOut={() => void signOut()}
         onSelect={(id) => {
           openChat(id)
@@ -499,11 +540,17 @@ export default function App() {
           sidebar.close()
         }}
         onDelete={(id) => void deleteChat(id)}
+        onDeleteChats={(ids) => void deleteChats(ids)}
+        onPinChats={(ids, p) => void pinChats(ids, p)}
+        onMoveChats={(ids, pid) => void moveChats(ids, pid)}
+        onExportChats={(ids) => setExportReq({ scope: 'chats', sessionIds: ids })}
         onRename={(id, t) => void renameChat(id, t)}
         onSettings={() => setSettingsOpen('general')}
       />
       <main className="main">
-        {page.kind === 'projects' ? (
+        {page.kind === 'artifacts' ? (
+          <ArtifactsView headerLeft={headerLeft} projects={projects} onOpen={openArtifact} />
+        ) : page.kind === 'projects' ? (
           <ProjectsView
             projects={projects}
             sessions={sessions}
@@ -516,6 +563,7 @@ export default function App() {
             onPin={(id, p) => void pinProject(id, p)}
             onExport={(id) => setExportReq({ scope: 'project', projectId: id })}
             onDeleted={projectDeleted}
+            onDropChats={(pid, ids) => void moveChats(ids, pid)}
           />
         ) : page.kind === 'project' && projects.some((p) => p.id === page.id) ? (
           <ProjectView
@@ -600,6 +648,7 @@ export default function App() {
         <ExportDialog
           scope={exportReq.scope}
           sessionId={exportReq.sessionId}
+          sessionIds={exportReq.sessionIds}
           projectId={exportReq.projectId}
           sessions={sessions}
           projects={projects}

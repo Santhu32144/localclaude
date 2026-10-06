@@ -422,6 +422,20 @@ export function buildFullExport(store: Store, opts: ExportOptions): Built {
   return { name, entries: bundle.entries, stats: bundle.stats }
 }
 
+/** Chats you selected, as a ZIP (with a backup of just those chats). */
+export function buildChatsExport(store: Store, ids: string[], opts: ExportOptions): Built {
+  const bundle = new Bundle()
+  const name = `LocalClaude chats ${day(Date.now())}`
+  const root = `${name}/`
+  const metas = ids.map((id) => store.getSession(id)).filter((m): m is SessionMeta => !!m)
+  const chats = metas.map((m) => addChat(bundle, store, m, root, opts, m.projectId ? store.getProject(m.projectId) : undefined))
+  const out = [`# ${name}`, '', `_${plural(chats.length, 'chat')} exported from LocalClaude on ${fmtTime(Date.now())}._`, '']
+  for (const c of chats) out.push(`- ${link(c.meta.title, rel(root, c.path))} · last active ${day(c.meta.updatedAt)}`)
+  bundle.add(`${root}README.md`, out.join('\n') + '\n')
+  if (opts.backup) bundle.add(`${root}localclaude-backup.json`, JSON.stringify(buildBackup(store, { sessionIds: metas.map((m) => m.id) })))
+  return { name, entries: bundle.entries, stats: bundle.stats }
+}
+
 // ---------------------------------------------------------------- backup & import
 export interface Backup {
   format: 'localclaude-backup'
@@ -432,15 +446,15 @@ export interface Backup {
   sessions: { meta: SessionMeta; history: ChatMessage[]; artifacts: Artifact[] }[]
 }
 
-/** Everything needed to restore chats, projects and memory (a whole app, or one project). */
-export function buildBackup(store: Store, scope: { projectId?: string }): Backup {
-  const projects = store.listProjects().filter((p) => !scope.projectId || p.id === scope.projectId)
-  const sessions = store.listSessions().filter((s) => !scope.projectId || s.projectId === scope.projectId)
+/** Everything needed to restore chats, projects and memory (a whole app, one project, or some chats). */
+export function buildBackup(store: Store, scope: { projectId?: string; sessionIds?: string[] }): Backup {
+  const projects = scope.sessionIds ? [] : store.listProjects().filter((p) => !scope.projectId || p.id === scope.projectId)
+  const sessions = store.listSessions().filter((s) => (!scope.projectId || s.projectId === scope.projectId) && (!scope.sessionIds || scope.sessionIds.includes(s.id)))
   return {
     format: 'localclaude-backup',
     version: 1,
     exportedAt: new Date().toISOString(),
-    memory: scope.projectId ? [] : store.getGlobalMemory(),
+    memory: scope.projectId || scope.sessionIds ? [] : store.getGlobalMemory(),
     projects: projects.map((project) => ({ project, files: store.loadProjectFiles(project.id) })),
     sessions: sessions.map((meta) => ({ meta, history: store.loadHistory(meta.id), artifacts: store.loadArtifacts(meta.id) }))
   }

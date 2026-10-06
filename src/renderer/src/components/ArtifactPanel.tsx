@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Artifact, ArtifactType } from '../../../shared/types'
 import { ARTIFACT_LABEL, artifactLang, fenced } from '../../../shared/format'
 import { api } from '../api'
@@ -27,11 +27,30 @@ export function ArtifactPanel(props: {
   state: PanelState
   onState: (s: PanelState) => void
   onClose: () => void
+  /** ask Claude to fix an error the preview hit */
+  onFix?: (title: string, error: string) => void
+  /** Claude is replying (fixing has to wait) */
+  busy?: boolean
 }) {
   const a = props.artifacts.find((x) => x.id === props.state.id)
   const [view, setView] = useState<'preview' | 'code'>('preview')
   const [copied, setCopied] = useState(false)
   useEffect(() => setView(a?.type === 'code' ? 'code' : 'preview'), [a?.id, a?.type])
+  const frame = useRef<HTMLIFrameElement>(null)
+  /** the first error the preview page reported (pages report them, see renderArtifactPage) */
+  const [error, setError] = useState<{ src: string; text: string } | null>(null)
+  useEffect(() => {
+    const onMessage = (e: MessageEvent): void => {
+      const f = frame.current
+      if (!f || e.source !== f.contentWindow || typeof e.data?.__lcArtifactError !== 'string') return
+      const src = f.getAttribute('src') ?? ''
+      // the page's internal address means nothing to Claude: "page:line:column" is enough
+      const text = String(e.data.__lcArtifactError).replace(/artifact:\/\/view\/\S*?(:\d+:\d+)/g, 'page$1')
+      setError((cur) => (cur?.src === src ? cur : { src, text }))
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
 
   if (!a) {
     return (
@@ -74,6 +93,7 @@ export function ArtifactPanel(props: {
   const v = a.versions[Math.min(vi, a.versions.length - 1)]
   const framed = FRAMED.includes(a.type)
   const src = `artifact://view/${encodeURIComponent(props.sessionId)}/${encodeURIComponent(a.id)}/${vi}?t=${v.ts}`
+  const pageError = error?.src === src ? error.text : null
 
   return (
     <aside className="artifact-panel">
@@ -126,6 +146,11 @@ export function ArtifactPanel(props: {
         >
           <Icon name={copied ? 'check' : 'copy'} size={16} />
         </button>
+        {framed && (
+          <button className="icon-btn" title="Open in your browser" onClick={() => void api.openArtifactInBrowser(props.sessionId, a.id, vi)}>
+            <Icon name="globe" size={16} />
+          </button>
+        )}
         <button className="icon-btn" title="Download" onClick={() => void api.saveArtifact(props.sessionId, a.id, vi)}>
           <Icon name="arrowDown" size={16} />
         </button>
@@ -139,8 +164,34 @@ export function ArtifactPanel(props: {
             <Markdown text={fenced(v.content, artifactLang(a))} />
           </div>
         ) : framed ? (
-          // No allow-same-origin: the page gets an opaque origin and can't reach the app, its storage or your files.
-          <iframe key={src} className="artifact-frame" src={src} sandbox="allow-scripts allow-popups allow-forms allow-modals" title={a.title} />
+          <>
+            {pageError && (
+              <div className="artifact-error" role="alert">
+                <div className="artifact-error-text">
+                  <b>This artifact ran into an error</b>
+                  <pre>{pageError}</pre>
+                </div>
+                {props.onFix && (
+                  <button
+                    className="btn primary small"
+                    disabled={props.busy}
+                    title={props.busy ? 'Claude is busy' : 'Ask Claude to fix it'}
+                    onClick={() => {
+                      props.onFix!(a.title, pageError)
+                      setError(null)
+                    }}
+                  >
+                    Fix with Claude
+                  </button>
+                )}
+                <button className="icon-btn" title="Dismiss" onClick={() => setError(null)}>
+                  <Icon name="x" size={14} />
+                </button>
+              </div>
+            )}
+            {/* No allow-same-origin: the page gets an opaque origin and can't reach the app, its storage or your files. */}
+            <iframe key={src} ref={frame} className="artifact-frame" src={src} sandbox="allow-scripts allow-popups allow-forms allow-modals" title={a.title} />
+          </>
         ) : (
           <div className="artifact-doc">
             <Markdown text={v.content} />
