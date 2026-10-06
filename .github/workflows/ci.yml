@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # The real app with a scripted Claude (no account or network needed)
+      - name: End-to-end tests (Windows)
+        if: runner.os == 'Windows'
+        run: node test/e2e/launch.mjs
+        env:
+          LOCALCLAUDE_E2E_SHOTS: e2e-shots
+
+      - name: End-to-end tests (Linux, virtual display)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node test/e2e/launch.mjs
+        env:
+          LOCALCLAUDE_E2E_SHOTS: e2e-shots
+
+      - name: Screenshots from the end-to-end tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-shots-${{ matrix.os }}
+          path: e2e-shots
+          if-no-files-found: ignore

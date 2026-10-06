@@ -7,7 +7,9 @@ const require = createRequire(import.meta.url)
 const electron = require('electron') // the binary's path when required from Node
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE // VS Code sets this; it would make Electron run as plain Node
-const child = spawn(electron, [resolve('test/e2e/run.mjs'), ...process.argv.slice(2)], { stdio: 'inherit', env })
+// CI's Linux machines don't set up Chromium's sandbox helper
+const flags = process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : []
+const child = spawn(electron, [...flags, resolve('test/e2e/run.mjs'), ...process.argv.slice(2)], { stdio: 'inherit', env })
 const timer = setTimeout(() => {
   console.error('✗ end-to-end tests timed out')
   child.kill()

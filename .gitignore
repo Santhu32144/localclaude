@@ -3,3 +3,4 @@ out/
 release/
 test/out/
 *.log
+e2e-shots/
