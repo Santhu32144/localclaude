@@ -1,6 +1,6 @@
 // End-to-end steps, run in order against one app instance (see run.mjs). Each step drives the real UI.
 import { join } from 'node:path'
-import { makeDocx, makePdf } from './files.mjs'
+import { makeDocx, makePdf, mcpServerScript } from './files.mjs'
 
 const lastTurnId = "(__t.qa('.turn').at(-1)?.dataset.turn ?? '')"
 
@@ -490,6 +490,38 @@ export const steps = [
       if (!c.exists(join(c.file('repo-worktrees'), 'feature-e2e-test', 'a.txt'))) throw new Error('the worktree folder is missing')
       await c.send('hello worktree', 'Echo: hello worktree')
       await c.shot('git-worktree')
+    }
+  },
+  {
+    name: 'MCP servers: add one with the form, test it, switch it off',
+    run: async (c) => {
+      const script = c.file('weather-mcp.mjs')
+      c.write(script, mcpServerScript())
+      await c.openSettings('Tools')
+      await c.page("__t.click(__t.byText('.mcp-manager .btn', 'Add a server'))")
+      await c.waitFor('form', "!!__t.q('.mcp-form')")
+      await c.page(`__t.setValue(__t.q('.mcp-form input[name="name"]'), 'weather')`)
+      await c.page(`__t.setValue(__t.q('.mcp-form input[name="command"]'), 'node')`)
+      await c.page(`__t.setValue(__t.q('.mcp-form textarea[name="args"]'), ${JSON.stringify(script)})`)
+      await c.page("__t.click(__t.byText('.mcp-form .btn', 'Test'))")
+      await c.waitFor('connected', "__t.text('.mcp-form .mcp-test').includes('Connected to e2e-weather · 2 tools')", 30000)
+      await c.page("__t.click(__t.byText('.mcp-form .btn', 'Save'))")
+      await c.waitFor('listed', "!!__t.byText('.mcp-server', 'weather') && !__t.q('.mcp-form')")
+      await c.page(`__t.click(__t.byText('.mcp-server', 'weather').querySelector('button[title^="Test"]'))`)
+      await c.waitFor('tested from the list', "__t.text('.mcp-list').includes('get_forecast, get_alerts')", 30000)
+      await c.shot('mcp-manager')
+      await c.page("__t.click(__t.byText('.mcp-server', 'weather').querySelector('.mcp-switch input'))")
+      await c.waitFor('switched off', "__t.byText('.mcp-server', 'weather').classList.contains('off')")
+      await c.page("__t.click(__t.byText('.mcp-manager .link-btn', 'Edit as JSON'))")
+      await c.waitFor('JSON shows it off', "__t.q('.mcp-manager textarea.code').value.includes('\"enabled\": false')")
+      await c.page("__t.click(__t.byText('.mcp-manager .link-btn', 'Back to the list'))")
+      await c.page("__t.click(__t.byText('.mcp-manager .btn', 'Add a server'))")
+      await c.page(`__t.setValue(__t.q('.mcp-form input[name="name"]'), 'memory')`)
+      await c.page(`__t.setValue(__t.q('.mcp-form input[name="command"]'), 'node')`)
+      await c.page("__t.click(__t.byText('.mcp-form .btn', 'Save'))")
+      await c.waitFor('a name LocalClaude uses is refused', "__t.text('.mcp-form').includes('used by LocalClaude itself')")
+      await c.page("__t.click(__t.byText('.mcp-form .btn', 'Cancel'))")
+      await c.closeModal()
     }
   }
 ]

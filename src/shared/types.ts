@@ -15,6 +15,17 @@ export interface McpServerEntry {
   enabled?: boolean
 }
 
+/** What "Test" found when connecting to an MCP server. */
+export interface McpTestResult {
+  ok: boolean
+  /** the tools it offers */
+  tools?: string[]
+  /** the name the server gives itself */
+  server?: string
+  ms?: number
+  error?: string
+}
+
 export interface AppSettings {
   defaultCwd: string
   defaultModel: string // '' = Claude Code default

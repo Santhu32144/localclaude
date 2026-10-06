@@ -14,6 +14,7 @@ import {
   type ExportResult,
   type GitStatus,
   type ImportResult,
+  type McpServerEntry,
   type MemoryItem,
   type PermissionDecision,
   type PermissionModeUI,
@@ -30,6 +31,7 @@ import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, s
 import { stopComputerHelper } from './computer'
 import { attachContextMenu } from './contextMenu'
 import { createWorktree, gitStatus } from './git'
+import { testMcpServer } from './mcpCheck'
 import { IMAGE_EXT, sniffImageType, thumbnail } from './images'
 import { KnowledgeService } from './knowledge'
 import { VaultSync, activeVault, detectVaults, obsidianUri } from './obsidian'
@@ -451,6 +453,7 @@ function registerIpc(): void {
   handle('chat:setStyle', (id: string, style: string) => manager.setStyle(id, style))
   handle('chat:rewindPreview', (id: string, messageId: string) => manager.rewindPreview(id, messageId))
   handle('chat:rewind', (id: string, req: RewindRequest) => manager.rewind(id, req))
+  handle('mcp:test', (entry: McpServerEntry) => testMcpServer(entry, { cwd: store.getSettings().defaultCwd || undefined }))
   handle('mcp:toggle', (id: string, name: string, enabled: boolean) => manager.toggleMcp(id, name, enabled))
   handle('mcp:reconnect', (id: string, name: string) => manager.reconnectMcp(id, name))
   handle('mcp:refresh', (id: string) => manager.refreshMcp(id))

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import type { AppSettings, AuthStatus, LockStatus, McpServerEntry, MemoryItem } from '../../../shared/types'
+import type { AppSettings, AuthStatus, LockStatus, MemoryItem } from '../../../shared/types'
 import { api } from '../api'
 import { REPLY_FONTS, UI_FONTS } from '../fonts'
 import { BackupsPanel } from './Backups'
+import { McpManager } from './McpManager'
 import { MemoryList } from './Memory'
 import { ObsidianPanel } from './ObsidianPanel'
 import { ShortcutField, StylesEditor, UsagePanel } from './SettingsExtras'
@@ -17,76 +18,6 @@ const TABS: [string, string][] = [
   ['account', 'Account & privacy'],
   ['about', 'About']
 ]
-
-const PRESETS: Record<string, { label: string; entry: McpServerEntry }> = {
-  playwright: {
-    label: 'Playwright browser (Claude gets its own Chromium)',
-    entry: { type: 'stdio', command: 'npx', args: ['-y', '@playwright/mcp@latest'], enabled: true }
-  },
-  filesystem: {
-    label: 'Filesystem server (example)',
-    entry: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '.'], enabled: true }
-  }
-}
-
-function McpEditor({ settings, onChange }: { settings: AppSettings; onChange: (p: Partial<AppSettings>) => Promise<void> }) {
-  const [json, setJson] = useState(JSON.stringify(settings.mcpServers, null, 2))
-  const [error, setError] = useState<string | null>(null)
-  const [saved, setSaved] = useState(false)
-
-  useEffect(() => setJson(JSON.stringify(settings.mcpServers, null, 2)), [settings.mcpServers])
-
-  const save = async (text = json): Promise<void> => {
-    try {
-      const parsed = JSON.parse(text || '{}')
-      if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Must be an object of { "name": { ...server } }')
-      await onChange({ mcpServers: parsed })
-      setError(null)
-      setSaved(true)
-      setTimeout(() => setSaved(false), 1500)
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e))
-    }
-  }
-
-  return (
-    <div className="field">
-      <label>MCP servers (this app only)</label>
-      <p className="muted small">
-        Same format as Claude Code's <code>mcpServers</code>: <code>{'{ "name": { "command": "npx", "args": [...] } }'}</code> for local servers, or{' '}
-        <code>{'{ "type": "http", "url": "https://…" }'}</code> for remote ones. Servers in your <code>~/.claude.json</code> also load when "user
-        settings" is on. Add <code>"enabled": false</code> to switch one off.
-      </p>
-      <textarea className="input code" rows={12} value={json} onChange={(e) => setJson(e.target.value)} spellCheck={false} />
-      {error && <div className="danger-text small">{error}</div>}
-      <div className="row gap">
-        <button className="btn" onClick={() => void save()}>
-          {saved ? 'Saved ✓' : 'Save MCP servers'}
-        </button>
-        {Object.entries(PRESETS).map(([key, p]) => (
-          <button
-            key={key}
-            className="btn ghost"
-            onClick={() => {
-              const cur = (() => {
-                try {
-                  return JSON.parse(json || '{}')
-                } catch {
-                  return {}
-                }
-              })()
-              const next = JSON.stringify({ ...cur, [key]: p.entry }, null, 2)
-              setJson(next)
-              void save(next)
-            }}
-          >
-            ＋ {p.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 export function SettingsDialog(props: {
   tab: string
@@ -315,7 +246,7 @@ export function SettingsDialog(props: {
                   </span>
                 </span>
               </label>
-              <McpEditor settings={s} onChange={props.onChange} />
+              <McpManager settings={s} onChange={props.onChange} />
               <p className="muted small">Changes apply to each chat the next time you send a message.</p>
             </>
           )}

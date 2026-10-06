@@ -1,4 +1,6 @@
-// Small real files for the end-to-end steps: a PDF with text, and Office files (ZIPs of XML).
+// Small real files for the end-to-end steps: a PDF with text, Office files (ZIPs of XML), and an MCP server.
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 /** A valid PDF with one line of text per page. */
 export function makePdf(pages) {
@@ -70,6 +72,23 @@ export function makeZip(entries) {
   end.writeUInt32LE(cd.length, 12)
   end.writeUInt32LE(offset, 16)
   return Buffer.concat([...local, cd, end])
+}
+
+/** A tiny MCP server (run with node) offering two tools, using the SDK from this repository. */
+export function mcpServerScript(name = 'e2e-weather') {
+  const sdk = (p) => pathToFileURL(resolve('node_modules/@modelcontextprotocol/sdk/dist/esm', p)).href
+  return `import { Server } from '${sdk('server/index.js')}'
+import { StdioServerTransport } from '${sdk('server/stdio.js')}'
+import { ListToolsRequestSchema } from '${sdk('types.js')}'
+const server = new Server({ name: '${name}', version: '1.0.0' }, { capabilities: { tools: {} } })
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    { name: 'get_forecast', description: 'Forecast', inputSchema: { type: 'object', properties: {} } },
+    { name: 'get_alerts', description: 'Alerts', inputSchema: { type: 'object', properties: {} } }
+  ]
+}))
+await server.connect(new StdioServerTransport())
+`
 }
 
 /** A Word document with one paragraph per line. */

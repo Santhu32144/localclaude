@@ -8,6 +8,8 @@ import { buildFullExport, buildProjectExport, chatMarkdown, importBackup, import
 import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
 import { createZip, readZip } from '../src/main/zip'
 import { branchName, createWorktree, gitStatus } from '../src/main/git'
+import { testMcpServer } from '../src/main/mcpCheck'
+import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { CHAT_TOOLS, ChatIndex, chatText, createChatsServer, snippet, terms } from '../src/main/chatSearch'
 import { imageSize, referencedImages, resultImages, sniffImageType, storeImage } from '../src/main/images'
@@ -923,6 +925,34 @@ async function gitHelpers() {
   console.log('✓ git: branch and changes, not a repository, worktrees on their own branch')
 }
 
+async function mcpServerCheck() {
+  const dir = mkdtempSync(join(tmpdir(), 'lc-mcp-'))
+  const sdk = (p: string) => pathToFileURL(join(process.cwd(), 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm', p)).href
+  writeFileSync(
+    join(dir, 'server.mjs'),
+    [
+      `import { Server } from '${sdk('server/index.js')}'`,
+      `import { StdioServerTransport } from '${sdk('server/stdio.js')}'`,
+      `import { ListToolsRequestSchema } from '${sdk('types.js')}'`,
+      `const server = new Server({ name: 'test-weather', version: '1.0.0' }, { capabilities: { tools: {} } })`,
+      `server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'get_forecast', inputSchema: { type: 'object' } }, { name: 'get_alerts', inputSchema: { type: 'object' } }] }))`,
+      `await server.connect(new StdioServerTransport())`
+    ].join('\n')
+  )
+  writeFileSync(join(dir, 'silent.mjs'), 'setInterval(() => {}, 1000)')
+  writeFileSync(join(dir, 'crash.mjs'), "console.error('missing API_TOKEN'); process.exit(1)")
+  const ok = await testMcpServer({ command: process.execPath, args: [join(dir, 'server.mjs')] })
+  assert.ok(ok.ok, ok.error); assert.deepEqual(ok.tools, ['get_forecast', 'get_alerts']); assert.equal(ok.server, 'test-weather')
+  const silent = await testMcpServer({ command: process.execPath, args: [join(dir, 'silent.mjs')] }, { timeoutMs: 1500 })
+  assert.equal(silent.ok, false); assert.match(silent.error!, /didn’t answer within 2 seconds/)
+  const crash = await testMcpServer({ command: process.execPath, args: [join(dir, 'crash.mjs')] }, { timeoutMs: 5000 })
+  assert.equal(crash.ok, false); assert.match(crash.error!, /missing API_TOKEN/, 'what the server printed explains the failure')
+  assert.match((await testMcpServer({ type: 'http' })).error!, /URL/); assert.match((await testMcpServer({ command: '' })).error!, /command/)
+  assert.equal((await testMcpServer({ type: 'http', url: 'http://127.0.0.1:9/mcp' }, { timeoutMs: 5000 })).ok, false)
+  rmSync(dir, { recursive: true, force: true })
+  console.log('✓ MCP test: connects and lists tools, timeouts, crashes with their output, missing settings')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -968,6 +998,7 @@ await imagesInChats()
 await backups()
 await knowledgeAndObsidian()
 await gitHelpers()
+await mcpServerCheck()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')
