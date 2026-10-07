@@ -69,7 +69,7 @@ On first launch, click **Sign in with Claude**. A browser opens to the Claude si
 Build on the OS you're targeting:
 
 ```bash
-# Windows → release/LocalClaude Setup 1.0.0.exe
+# Windows → release/LocalClaude-Setup-1.0.0.exe
 npm run dist:win
 
 # Linux → release/LocalClaude-1.0.0.AppImage and .deb
@@ -77,6 +77,8 @@ npm run dist:linux
 ```
 
 The installer is about 250 MB because it carries the native Claude Code binary.
+
+Pushing a version tag (`git tag v1.2.3 && git push origin v1.2.3`) builds both on GitHub and puts them, with the source code, in a draft release for that tag.
 
 ## Computer use
 

@@ -1,0 +1,73 @@
+name: Release
+
+# Pushing a version tag (v1.2.3) builds the Windows installer and the Linux AppImage and .deb on
+# GitHub, and puts them in a draft release for that tag. GitHub adds the source code to it.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win
+          - os: ubuntu-latest
+            target: --linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # Installs Claude Code's native binary for this OS, which the installer carries
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build the installers
+        shell: bash
+        run: npx electron-vite build && npx electron-builder ${{ matrix.target }} --publish never
+        env:
+          # not code-signed
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            release/*.exe
+            release/*.AppImage
+            release/*.deb
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Draft the release
+        run: |
+          ls -la dist
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag \
+            --title "LocalClaude ${GITHUB_REF_NAME#v}" --notes-file .github/release-notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}

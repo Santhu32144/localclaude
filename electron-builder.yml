@@ -26,6 +26,8 @@ win:
     - nsis
   icon: build/icon.png
 nsis:
+  # no spaces: GitHub release downloads turn them into dots
+  artifactName: ${productName}-Setup-${version}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
