@@ -28,34 +28,51 @@
   --mode-edits: #7b5fc4;
   --mode-plan: #2f7a8c;
   --code-inline: #9a4a2c;
+  --side-text: #2b2a27;
+  --faint: rgba(31, 30, 29, 0.3);
+  --new-icon-bg: rgba(31, 30, 29, 0.08);
+  --search-bg: #ffffff;
+  --search-border: rgba(31, 30, 29, 0.14);
+  --input-bg: #ffffff;
+  --input-border: rgba(31, 30, 29, 0.24);
+  --chip-bg: rgba(31, 30, 29, 0.06);
 }
+/* Dark: measured from Claude Code's desktop app, so the two look the same side by side. */
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #1e1e1c;
-  --bg-elev: #262624;
-  --sidebar: #1a1a19;
-  --hover: rgba(255, 255, 255, 0.06);
-  --active: rgba(255, 255, 255, 0.1);
-  --border: rgba(255, 255, 255, 0.1);
-  --border-strong: rgba(255, 255, 255, 0.18);
-  --text: #ecebe4;
-  --muted: #9c9a92;
+  --bg: #151515;
+  --bg-elev: #1d1d1d;
+  --sidebar: #111111;
+  --hover: rgba(255, 255, 255, 0.07);
+  --active: rgba(255, 255, 255, 0.15);
+  --border: #292929;
+  --border-strong: #3a3a3a;
+  --text: #f0efec;
+  --muted: #898781;
   --accent: #d97757;
   --accent-hover: #e48a6b;
   --accent-soft: rgba(217, 119, 87, 0.16);
-  --user-bubble: #2e2d2a;
-  --code-bg: #232321;
-  --danger: #e5675c;
+  --user-bubble: #212121;
+  --code-bg: #1a1a19;
+  --danger: #ff2c56;
   --warn: #e0a243;
-  --ok: #5fbf85;
-  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --ok: #32d74b;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
   --mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, 'DejaVu Sans Mono', monospace;
   --serif: 'Source Serif 4 Variable', Georgia, serif;
-  --diff-add: rgba(95, 191, 133, 0.16);
-  --diff-del: rgba(229, 103, 92, 0.16);
+  --diff-add: rgba(50, 215, 75, 0.13);
+  --diff-del: rgba(255, 44, 86, 0.13);
   --mode-edits: #a990f0;
   --mode-plan: #5fb6c9;
   --code-inline: #e9a283;
+  --side-text: #c3c2b7;
+  --faint: #4d4c49;
+  --new-icon-bg: #2c2c2a;
+  --search-bg: #1d1d1d;
+  --search-border: #343434;
+  --input-bg: #20201f;
+  --input-border: #4d4d4c;
+  --chip-bg: #2d2d2d;
 }
 
 * {
