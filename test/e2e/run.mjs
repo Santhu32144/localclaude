@@ -93,8 +93,29 @@ app.whenReady().then(async () => {
     throw new Error(`timed out waiting for ${desc}`)
   }
 
+  /**
+   * Run code in the design on the canvas (the page Claude made, in its sandboxed frame); null when there's none.
+   * `which`: part of the frame's address, e.g. 'artifact://draft' for the design while Claude is writing it.
+   */
+  const frame = (js, which = 'design=1') => {
+    const f = wc.mainFrame.framesInSubtree.find((x) => x.url.includes(which))
+    return f ? f.executeJavaScript(js) : Promise.resolve(null)
+  }
+
   const ctx = {
     page,
+    frame,
+    /** Poll an expression in the design's frame until it's truthy. */
+    waitForFrame: async (desc, js, timeout = 10000, which) => {
+      const t0 = Date.now()
+      let last
+      while (Date.now() - t0 < timeout) {
+        last = await frame(js, which).catch((e) => String(e))
+        if (last) return last
+        await sleep(100)
+      }
+      throw new Error(`timed out waiting for ${desc} in the design (last: ${JSON.stringify(last)})`)
+    },
     until,
     waitFor,
     sleep,

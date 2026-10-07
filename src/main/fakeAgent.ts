@@ -106,8 +106,39 @@ export function fakeQuery({ prompt, options = {} }: { prompt: string | AsyncIter
         ...extra
       })
     }
+    /** A tool call whose input streams in small pieces, as Claude Code sends a long one. */
+    const streamTool = async (name: string, input: Record<string, unknown>, run: () => Promise<{ text: string; isError: boolean }>): Promise<void> => {
+      const id = 'toolu_' + randomUUID().slice(0, 8)
+      const mid = 'msg_' + randomUUID().slice(0, 8)
+      out.push({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: mid } } })
+      out.push({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id, name } } })
+      const json = JSON.stringify(input)
+      for (let i = 0; i < json.length && !interrupted; i += 40) {
+        out.push({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: json.slice(i, i + 40) } } })
+        await sleep(60)
+      }
+      out.push({ type: 'assistant', uuid: randomUUID(), parent_tool_use_id: null, message: { id: mid, content: [{ type: 'tool_use', id, name, input }] } })
+      const r = await run()
+      out.push({ type: 'user', uuid: randomUUID(), parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: r.text, is_error: r.isError }] } })
+    }
     let reply = `Echo: ${text}` + (images ? ` (with ${images} image${images === 1 ? '' : 's'})` : '')
-    if (t.includes('make broken artifact')) {
+    if (t.startsWith('comment on the design')) {
+      // a comment from the design canvas names the element; this design has one headline to change
+      const input = { id: 'bakery-landing', old_str: 'Fresh bread daily', new_str: 'Warm bread, every morning' }
+      await callTool('mcp__artifacts__update_artifact', input, () => tool('artifacts', 'update_artifact', input))
+      reply = 'Changed the headline.'
+    } else if (t.includes('design a bakery')) {
+      // written slowly enough to watch it appear on the canvas; the script at the end only runs in the finished page
+      const loaves = ['Country sourdough', 'Seeded rye', 'Brioche', 'Olive fougasse', 'Cinnamon knots', 'Baguette']
+      const content =
+        '<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;font-family:Georgia,serif;background:#fbf6ee;color:#3b2a1a}header{padding:56px 40px}h1{font-size:44px;margin:0 0 12px}button{background:#b4542d;color:#fff;border:0;border-radius:8px;padding:12px 18px;font-size:16px}.menu{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:0 40px 56px}.loaf{background:#fff;border-radius:12px;padding:20px}</style></head>' +
+        '<body><header><h1 id="hero">Fresh bread daily</h1><p class="lead">Order by 8 pm, pick it up warm at 7 am.</p><button>Pre-order</button></header>' +
+        `<section class="menu">${loaves.map((l, i) => `<div class="loaf"><h3>${l}</h3><p>Baked every morning from stone-ground flour, with a long slow rise for flavour. ₹${180 + i * 40}</p></div>`).join('')}</section>` +
+        '<script>document.body.dataset.ready="yes"</script></body></html>'
+      const input = { id: 'bakery-landing', type: 'html', title: 'Bakery landing page', content }
+      await streamTool('mcp__artifacts__create_artifact', input, () => tool('artifacts', 'create_artifact', input))
+      reply = 'I designed a landing page for the bakery.'
+    } else if (t.includes('make broken artifact')) {
       const input = { id: 'broken-page', type: 'html', title: 'Broken page', content: '<h1>Broken</h1><script>throw new Error("boom from the page")</script>' }
       await callTool('mcp__artifacts__create_artifact', input, () => tool('artifacts', 'create_artifact', input))
       reply = 'I made a page (it has a bug).'

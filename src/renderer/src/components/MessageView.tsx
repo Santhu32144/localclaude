@@ -2,6 +2,7 @@ import { memo, useState, type ReactNode } from 'react'
 import type { ArtifactType, ChatMessage } from '../../../shared/types'
 import { countChanges, type DiffLine } from '../../../shared/diff'
 import { ARTIFACT_LABEL } from '../../../shared/format'
+import { streamingFields } from '../../../shared/partialJson'
 import { COMPUTER_TOOL, editDiff, fileName, isArtifactTool, parsedInput, plural, short, stepText, summarize, type Step, type ToolPart } from '../../../shared/steps'
 import { artifactIcon } from './ArtifactPanel'
 import { Icon } from './Icon'
@@ -265,12 +266,23 @@ function toBlocks(messages: ChatMessage[]): Block[] {
 /** The card Claude's artifact shows in the conversation; click to open it in the side panel. */
 function ArtifactCard({ part, info, onOpen }: { part: ToolPart; info?: (id: string) => { title: string; type: ArtifactType; versions: number } | undefined; onOpen?: (id: string) => void }) {
   const input = parsedInput(part)
-  const id = String(input.id ?? '')
+  // while it streams, read what has arrived of the id and title
+  const partial = Object.keys(input).length ? null : streamingFields(part.inputJsonPartial ?? '')
+  const id = String(input.id ?? (partial?.id?.done ? partial.id.value : ''))
   const known = id ? info?.(id) : undefined
   const type = (known?.type ?? (input.type as ArtifactType | undefined) ?? 'html') as ArtifactType
-  const title = known?.title ?? (input.title ? String(input.title) : 'Artifact')
+  const title = known?.title ?? (input.title ? String(input.title) : partial?.title?.value || 'Artifact')
   const updating = part.name.endsWith('update_artifact')
-  const status = !part.done ? (updating ? 'Updating…' : 'Writing…') : part.isError ? 'Failed' : updating ? `Updated${known ? ` · version ${known.versions}` : ''}` : ARTIFACT_LABEL[type]
+  // the version this call made (the tool's reply says it)
+  const made = /version (\d+)/.exec(part.result ?? '')?.[1]
+  const size = (part.inputJsonPartial ?? '').length
+  const status = !part.done
+    ? `${updating ? 'Updating' : 'Writing'}…${size > 1024 ? ` ${(size / 1024).toFixed(1)} KB` : ''}`
+    : part.isError
+      ? 'Failed'
+      : updating
+        ? `Updated${made ? ` · version ${made}` : ''}`
+        : ARTIFACT_LABEL[type]
   return (
     <button className={'artifact-chip' + (part.isError ? ' error' : '')} disabled={!part.done || part.isError || !onOpen || !id} onClick={() => onOpen?.(id)}>
       <span className="artifact-card-icon">

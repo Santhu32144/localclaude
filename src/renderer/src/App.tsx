@@ -10,6 +10,7 @@ import type {
   AuthStatus,
   ChatMessage,
   ContextUsage,
+  DesignInfo,
   InitInfo,
   LockStatus,
   McpStatus,
@@ -25,6 +26,7 @@ import { api } from './api'
 import { applyFonts } from './fonts'
 import { ArtifactsView } from './components/ArtifactsView'
 import { ChatView } from './components/ChatView'
+import { DesignsView } from './components/DesignsView'
 import { LockScreen } from './components/LockScreen'
 import { LoginScreen } from './components/LoginScreen'
 import { ExportDialog } from './components/ExportDialog'
@@ -128,7 +130,7 @@ export default function App() {
     const w = Number(readPref('sidebarWidth'))
     return w >= SIDEBAR_WIDTH.min && w <= SIDEBAR_WIDTH.max ? w : SIDEBAR_WIDTH.default
   })
-  const [page, setPage] = useState<{ kind: 'chat' } | { kind: 'projects' } | { kind: 'artifacts' } | { kind: 'project'; id: string }>({ kind: 'chat' })
+  const [page, setPage] = useState<{ kind: 'chat' } | { kind: 'projects' } | { kind: 'artifacts' } | { kind: 'designs' } | { kind: 'project'; id: string }>({ kind: 'chat' })
   const [projects, setProjects] = useState<Project[]>([])
   const [artifacts, setArtifacts] = useState<Record<string, Artifact[]>>({})
   /** the artifact Claude touched most recently, so the chat can open it in the side panel */
@@ -284,14 +286,44 @@ export default function App() {
     })
   }, [activeId])
 
-  const newChat = useCallback(async (cwd?: string, projectId?: string) => {
-    const meta = await api.createSession(cwd, projectId)
-    loaded.current.add(meta.id)
-    setHistories((h) => ({ ...h, [meta.id]: [] }))
-    setSessions((list) => [meta, ...list])
-    openChat(meta.id)
-    return meta
-  }, [openChat])
+  /** Show a chat that was just made (it has no history yet). */
+  const adoptChat = useCallback(
+    (meta: SessionMeta) => {
+      loaded.current.add(meta.id)
+      setHistories((h) => ({ ...h, [meta.id]: [] }))
+      setSessions((list) => [meta, ...list.filter((s) => s.id !== meta.id)])
+      openChat(meta.id)
+      return meta
+    },
+    [openChat]
+  )
+  const newChat = useCallback(
+    async (cwd?: string, projectId?: string, design?: DesignInfo) => adoptChat(await api.createSession(cwd, projectId, design)),
+    [adoptChat]
+  )
+
+  /** Build a design in code: a new chat in your project's folder, which reads the design's file. */
+  const handoffDesign = useCallback(
+    async (sessionId: string, artifactId: string, version: number) => {
+      const folder = await api.pickFolder('Folder of the project to build the design in')
+      if (!folder) return
+      try {
+        const { meta, path } = await api.designHandoff(sessionId, artifactId, version, folder)
+        adoptChat(meta)
+        const file = path.includes(' ') ? `@"${path}"` : `@${path}`
+        await api.send({
+          sessionId: meta.id,
+          text:
+            `Build this design in this project: ${file} (a single HTML file I made in LocalClaude's Design space).\n\n` +
+            `Match its layout, colors, typography, spacing and content closely, but write it the way this project does things, with its framework, components and conventions, instead of pasting the HTML in. Look at how the project is organized first.`,
+          attachments: []
+        })
+      } catch (e) {
+        setToast({ text: e instanceof Error ? e.message : String(e), error: true })
+      }
+    },
+    [adoptChat]
+  )
 
   const deleteChat = useCallback(
     async (id: string) => {
@@ -541,6 +573,11 @@ export default function App() {
           setPage({ kind: 'artifacts' })
           sidebar.close()
         }}
+        designActive={page.kind === 'designs' || (page.kind === 'chat' && !!active?.design)}
+        onDesign={() => {
+          setPage({ kind: 'designs' })
+          sidebar.close()
+        }}
         onSignOut={() => void signOut()}
         onSelect={(id) => {
           openChat(id)
@@ -571,6 +608,15 @@ export default function App() {
       <main className="main">
         {page.kind === 'artifacts' ? (
           <ArtifactsView headerLeft={headerLeft} projects={projects} onOpen={openArtifact} />
+        ) : page.kind === 'designs' ? (
+          <DesignsView
+            headerLeft={headerLeft}
+            sessions={sessions}
+            onOpen={openChat}
+            onCreate={(d) => newChat(d.cwd, undefined, d.design).then((meta) => api.send({ sessionId: meta.id, text: d.text, attachments: d.attachments }))}
+            onPin={(id, p) => void pinChat(id, p)}
+            onDelete={(id) => void deleteChat(id)}
+          />
         ) : page.kind === 'projects' ? (
           <ProjectsView
             projects={projects}
@@ -635,10 +681,15 @@ export default function App() {
             onSettings={updateSettings}
             onRename={(t) => void renameChat(active.id, t)}
             onPin={(p) => void pinChat(active.id, p)}
-            onDelete={() => void deleteChat(active.id)}
+            onDelete={() => {
+              void deleteChat(active.id)
+              if (active.design) setPage({ kind: 'designs' })
+            }}
             onExport={() => setExportReq({ scope: 'chat', sessionId: active.id })}
             findRequest={findRequest}
             onFindHandled={() => setFindRequest(null)}
+            onOpenDesigns={() => setPage({ kind: 'designs' })}
+            onHandoff={(artifactId, version) => void handoffDesign(active.id, artifactId, version)}
           />
         ) : (
           <div className="empty-main">

@@ -17,6 +17,7 @@ Everything runs and is stored **on this machine only**. Chats, settings and MCP 
 | Claude Code-style transcript | `● Update(file)` tool rows with `⎿` summaries, numbered diffs for every edit, Normal/Verbose view (Ctrl+O), animated working status |
 | Checkpoints & rewind | Hover a message → Rewind (or Esc Esc): restore the code, the conversation, or both to before that message |
 | Artifacts | Claude makes web pages, React apps, SVG, Mermaid diagrams, documents and code in a side panel with Preview/Code, version history, copy, download and open in your browser. When a preview hits an error, **Fix with Claude** sends it to Claude. The Artifacts page lists every artifact from every chat. Stored encrypted with the chat; previews run in a sandboxed frame (React/Mermaid load their libraries from public CDNs) |
+| Design | Like Claude Design: on the Design page, pick a prototype, slide deck, wireframe, one-pager or anything else, describe it (add screenshots for reference), and Claude builds it on a large canvas beside the chat. View it at desktop, tablet or mobile size, zoom, and switch between versions. Turn on **Comment** and click any part of the design to tell Claude what to change there. Export a PDF (one page per slide for decks), a PNG at 2× or the HTML. **Match a codebase's style** has Claude read a folder's colors, fonts and components first; **Build it in code** starts a chat in your project's folder that builds the design there |
 | Projects | Group chats with shared instructions, knowledge, memory and a working folder. Knowledge files can be PDFs, Word, PowerPoint and Excel files, notes, code or data; when there's too much to send with every message Claude searches it instead. Link a folder (like part of your Obsidian vault) and it stays in sync. The project page shows how much of Claude's context it uses and lists every artifact from its chats |
 | Obsidian | Link your vault (found automatically) and it becomes LocalClaude's knowledge store: Claude searches and reads your notes in any chat, saves notes when you ask, and your chats (with images) and memory are kept as notes. One switch in Settings → Obsidian turns it all off without unlinking |
 | Files changed | A side panel lists every file Claude edited in the chat with its diffs, open it (or in VS Code), and undo the changes |
@@ -138,6 +139,8 @@ src/main/computer.ts    computer-use MCP tool (screenshots, mouse, keyboard)
 src/main/store.ts       encrypted, machine-bound storage
 src/main/index.ts       window + IPC
 src/main/artifacts.ts   artifact tool and preview pages
+src/main/design.ts      Claude's instructions for designs, comment mode on the canvas
+src/main/designExport.ts  designs as PDF and PNG (a hidden, sandboxed window)
 src/main/memory.ts      memory tool
 src/main/chatSearch.ts  full-text chat search (sidebar and Claude's tool)
 src/main/images.ts      images kept with chats, thumbnails

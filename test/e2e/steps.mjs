@@ -713,5 +713,96 @@ export const steps = [
       await c.page("__t.key(window, 'Escape')")
       await c.waitFor('closed', "!__t.q('.remote-dialog')")
     }
+  },
+  {
+    name: 'Design: describe a prototype and Claude builds it on the canvas',
+    run: async (c) => {
+      await c.page("__t.click(__t.byText('.side-nav', 'Design'))")
+      await c.waitFor('the Design page', "__t.text('.page-head h1') === 'Design' && !!__t.q('.design-start') && !__t.q('.design-card')")
+      await c.page("__t.click(__t.byText('.design-kind', 'Slide deck'))")
+      await c.waitFor('slide deck picked', "__t.q('.design-kind.on')?.innerText.includes('Slide deck') && __t.text('.design-start .btn.primary').includes('slide deck')")
+      await c.page("__t.click(__t.byText('.design-kind', 'Prototype'))")
+      await c.page("__t.setValue(__t.q('.design-prompt'), 'Design a bakery landing page')")
+      await c.shot('design-start')
+      await c.page("__t.click(__t.byText('.design-start .btn.primary', 'Create'))")
+      await c.waitFor('the design opens beside its chat', "__t.text('.titlebar .crumb') === 'Design' && !!__t.q('.chat-row.design-row .design-canvas') && __t.text('.design-kind-tag') === 'Prototype'")
+      // the page builds up on the canvas while Claude is still writing it (scripts wait for the finished page)
+      await c.waitFor('writing, with its name', "__t.text('.design-writing').startsWith('Writing Bakery landing page') && __t.text('.design-name') === 'Bakery landing page'")
+      await c.waitForFrame('the page so far', "!!document.getElementById('hero') && document.querySelectorAll('.loaf').length < 6 && !document.body.dataset.ready", 10000, 'artifact://draft')
+      await c.shot('design-writing')
+      if (!(await c.page("__t.qa('.artifact-chip').some((e) => e.innerText.includes('Bakery landing page') && e.innerText.includes('Writing'))"))) throw new Error('the card in the chat should say it is being written')
+      await c.waitFor('Claude replied', "__t.qa('.turn').some((t) => t.innerText.includes('I designed a landing page')) && !__t.q('.send.stop')", 15000)
+      await c.waitFor('the finished design on the canvas', "!__t.q('.design-draft') && !__t.q('.design-writing') && __t.q('.design-frame iframe')?.style.width === '1440px'")
+      await c.waitForFrame('the page, its script run', "document.getElementById('hero')?.textContent === 'Fresh bread daily' && document.querySelectorAll('.loaf').length === 6 && document.body.dataset.ready === 'yes'")
+      if (!(await c.page("__t.q('.side-nav.active')?.innerText.includes('Design')"))) throw new Error('the sidebar should show Design as open')
+      if (await c.page("__t.qa('.session-item').some((e) => e.innerText.toLowerCase().includes('bakery'))")) throw new Error('designs belong on the Design page, not in the chat list')
+      await c.shot('design-canvas')
+    }
+  },
+  {
+    name: 'Design: mobile size, and a comment on one element becomes a new version',
+    run: async (c) => {
+      await c.page(`__t.click(__t.q('.design-viewports button[title^="Mobile"]'))`)
+      await c.waitFor('a phone-sized frame', "!!__t.q('.design-frame.device') && __t.q('.design-frame iframe').style.width === '390px'")
+      await c.page("__t.click(__t.q('.design-comment-btn'))")
+      await c.waitFor('comment mode', "!!__t.q('.design-comment-btn.on') && !!__t.q('.design-hint')")
+      // clicking the headline inside the design picks it instead of reaching the page
+      await c.frame("document.getElementById('hero').click(); true")
+      await c.waitFor('the comment box', "!!__t.q('.design-comment') && __t.text('.design-comment-target').includes('Fresh bread daily')")
+      await c.page("__t.setValue(__t.q('.design-comment textarea'), 'Make the headline warmer')")
+      await c.shot('design-comment')
+      await c.page("__t.key(__t.q('.design-comment textarea'), 'Enter')")
+      await c.waitFor('sent with the element', "!__t.q('.design-comment') && __t.qa('.msg-user').some((m) => m.innerText.includes('#hero') && m.innerText.includes('Make the headline warmer'))")
+      await c.waitFor('version 2 on the canvas', "__t.text('.design-toolbar .version-menu').includes('v2') && !__t.q('.send.stop')", 15000)
+      if (!(await c.page("__t.qa('.artifact-chip').some((e) => e.innerText.includes('Updated · version 2'))"))) throw new Error('the update card should say which version it made')
+      await c.waitForFrame('the new headline', "document.getElementById('hero')?.textContent === 'Warm bread, every morning'")
+      // earlier versions stay one click away
+      await c.page("__t.click(__t.q('.design-toolbar .version-menu .menu-trigger'))")
+      await c.menuItem('Version 1')
+      await c.waitForFrame('version 1 again', "document.getElementById('hero')?.textContent === 'Fresh bread daily'")
+      await c.page("__t.click(__t.q('.design-comment-btn'))")
+      await c.waitFor('comment mode off', "!__t.q('.design-comment-btn.on') && !__t.q('.design-hint')")
+    }
+  },
+  {
+    name: 'Design: export as PDF and PNG',
+    run: async (c) => {
+      const pdf = c.file('bakery.pdf')
+      c.answers.push(pdf)
+      await c.page("__t.click(__t.q('.design-export .menu-trigger'))")
+      await c.menuItem('PDF')
+      await c.until('the PDF', () => c.exists(pdf) && c.read(pdf).subarray(0, 5).toString() === '%PDF-', 30000)
+      await c.waitFor('saved notice', "__t.text('.design-notice').includes('bakery.pdf')")
+      const png = c.file('bakery.png')
+      c.answers.push(png)
+      await c.page("__t.click(__t.q('.design-export .menu-trigger'))")
+      await c.menuItem('PNG image')
+      await c.until('the PNG', () => c.exists(png) && c.read(png).subarray(1, 4).toString() === 'PNG', 30000)
+      if (process.env.LOCALCLAUDE_E2E_SHOTS) c.write(join(process.env.LOCALCLAUDE_E2E_SHOTS, 'design-export.png'), c.read(png))
+      // the phone's width, and the whole page (at least the phone's screen), at twice the pixels
+      const [width, height] = [c.read(png).readUInt32BE(16), c.read(png).readUInt32BE(20)]
+      if (width !== 780 || height < 1688) throw new Error(`the PNG should be 780 wide and at least 1688 tall, not ${width}×${height}`)
+    }
+  },
+  {
+    name: 'Design: the Design page lists it, and it can be built in code',
+    run: async (c) => {
+      await c.page("__t.click(__t.byText('.titlebar .crumb', 'Design'))")
+      await c.waitFor('listed with a preview', "__t.qa('.design-card').length === 1 && !!__t.q('.design-card .design-thumb iframe')")
+      await c.shot('design-page')
+      await c.page("__t.click(__t.q('.design-card'))")
+      await c.waitFor('open again', "!!__t.q('.design-canvas .design-frame iframe')")
+      const proj = c.file('bakery-site')
+      c.mkdir(proj)
+      c.answers.push(proj)
+      await c.page("__t.click(__t.q('.design-export .menu-trigger'))")
+      await c.menuItem('Build it in code')
+      await c.waitFor(
+        'a new chat in that folder, asked to build it',
+        "!__t.q('.design-canvas') && __t.text('.titlebar .pill-btn .pill-label') === 'bakery-site' && __t.qa('.msg-user').some((m) => m.innerText.includes('Build this design in this project') && m.innerText.includes('localclaude-handoff'))",
+        15000
+      )
+      await c.waitFor('in the chat list', "__t.qa('.session-item').some((e) => e.classList.contains('active') && e.innerText.includes('Build this design'))")
+    }
   }
 ]

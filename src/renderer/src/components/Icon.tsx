@@ -45,7 +45,14 @@ const PATHS: Record<string, string> = {
   shapes: 'M7 3l4.5 7.5h-9z M17 10a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z M8.5 14h7v7h-7z',
   branch: 'M6 3v12 M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M18 9a9 9 0 0 1-9 9',
   image: 'M4 5h16v14H4z M4 16l5-5 4 4 2-2 5 5 M15.5 9.5h.01',
-  x: 'M6 6l12 12 M18 6L6 18'
+  x: 'M6 6l12 12 M18 6L6 18',
+  // design
+  penTool: 'M12 19l7-7 3 3-7 7z M18 13l-1.5-7.5L2 2l3.5 14.5L13 18z M2 2l7.586 7.586 M11 13a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+  cursor: 'M5 3l14 7-6 2-2 6z M13 13l5 5',
+  slides: 'M3 4h18 M4 4v11h16V4 M12 15v5 M8 20h8',
+  layout: 'M4 4h16v16H4z M4 9h16 M9 9v11',
+  tablet: 'M6 2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z M11 18h2',
+  comment: 'M21 12a8 8 0 0 1-11.7 7.1L4 20l1-4.4A8 8 0 1 1 21 12z M8.5 10.5h7 M8.5 13.5h4'
 }
 
 export function Icon({ name, size = 16, className = '' }: { name: string; size?: number; className?: string }) {

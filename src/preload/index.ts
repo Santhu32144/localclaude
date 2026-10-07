@@ -7,6 +7,8 @@ import type {
   BackupResult,
   BackupStatus,
   ChatMessage,
+  DesignExportResult,
+  DesignInfo,
   LockStatus,
   McpServerEntry,
   McpTestResult,
@@ -62,7 +64,7 @@ const api = {
   setSettings: (patch: Partial<AppSettings>) => inv<AppSettings>('settings:set', patch),
 
   listSessions: () => inv<SessionMeta[]>('sessions:list'),
-  createSession: (cwd?: string, projectId?: string) => inv<SessionMeta>('sessions:create', cwd, projectId),
+  createSession: (cwd?: string, projectId?: string, design?: DesignInfo) => inv<SessionMeta>('sessions:create', cwd, projectId, design),
   deleteSession: (id: string) => inv<void>('sessions:delete', id),
   updateSession: (id: string, patch: Partial<Pick<SessionMeta, 'title' | 'cwd' | 'pinned' | 'projectId'>>) => inv<SessionMeta>('sessions:update', id, patch),
   history: (id: string) => inv<ChatMessage[]>('sessions:history', id),
@@ -129,6 +131,12 @@ const api = {
   projectArtifacts: (id: string) => inv<ProjectArtifactRef[]>('projects:artifacts', id),
   allArtifacts: () => inv<ProjectArtifactRef[]>('artifacts:all'),
   openArtifactInBrowser: (sessionId: string, artifactId: string, version?: number) => inv<boolean>('artifacts:openInBrowser', sessionId, artifactId, version),
+  /** a design as PDF (one page per slide for decks) or a PNG of the whole page at this width (and at least this height) */
+  exportDesign: (sessionId: string, artifactId: string, version: number, format: 'pdf' | 'png', width: number, height?: number) =>
+    inv<DesignExportResult>('design:export', sessionId, artifactId, version, format, width, height),
+  /** a new chat in this folder that can read the design, to build it in code */
+  designHandoff: (sessionId: string, artifactId: string, version: number, folder: string) =>
+    inv<{ meta: SessionMeta; path: string }>('design:handoff', sessionId, artifactId, version, folder),
   projectContext: (id: string) => inv<ProjectContextUsage | null>('projects:context', id),
 
   /** Memory: projectId null = global memory */
