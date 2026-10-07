@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AppSettings, AuthStatus, LockStatus, MemoryItem } from '../../../shared/types'
 import { api } from '../api'
 import { REPLY_FONTS, UI_FONTS } from '../fonts'
@@ -36,6 +36,20 @@ export function SettingsDialog(props: {
   const [lock, setLock] = useState<LockStatus | null>(null)
   const [info, setInfo] = useState<Awaited<ReturnType<typeof api.appInfo>> | null>(null)
   const [prompt, setPrompt] = useState(s.appendSystemPrompt)
+  const [userName, setUserName] = useState(s.userName ?? '')
+  // the name is saved when you leave the field, or when Settings closes while you're typing
+  const saveName = (value: string): void => {
+    if (value.trim() !== (s.userName ?? '')) void props.onChange({ userName: value.trim() })
+  }
+  const pendingName = useRef<string | null>(null)
+  const onChangeSetting = useRef(props.onChange)
+  onChangeSetting.current = props.onChange
+  useEffect(
+    () => () => {
+      if (pendingName.current !== null) void onChangeSetting.current({ userName: pendingName.current.trim() })
+    },
+    []
+  )
 
   useEffect(() => {
     void api.lockStatus().then(setLock)
@@ -69,6 +83,25 @@ export function SettingsDialog(props: {
           {props.tab === 'general' && (
             <>
               <h2>General</h2>
+              <div className="field">
+                <label>What should Claude call you?</label>
+                <input
+                  className="input"
+                  name="userName"
+                  placeholder={props.auth.email?.split('@')[0] ?? 'Your name'}
+                  value={userName}
+                  onChange={(e) => {
+                    setUserName(e.target.value)
+                    pendingName.current = e.target.value
+                  }}
+                  onBlur={(e) => {
+                    pendingName.current = null
+                    saveName(e.target.value)
+                  }}
+                  onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+                />
+                <p className="muted small">Shown at the bottom of the sidebar, and Claude knows it in your chats.</p>
+              </div>
               <div className="field">
                 <label>Default working folder for new chats</label>
                 <div className="row gap">

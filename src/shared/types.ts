@@ -80,6 +80,8 @@ export interface AppSettings {
   obsidianSyncMemory: boolean
   /** LocalClaude's folder inside the vault */
   obsidianFolder: string
+  /** what Claude calls you (shown in the sidebar too); '' = the name from your email */
+  userName: string
   /** Extra instructions appended to Claude Code's system prompt */
   appendSystemPrompt: string
 }
@@ -340,6 +342,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   obsidianSyncChats: false,
   obsidianSyncMemory: false,
   obsidianFolder: 'LocalClaude',
+  userName: '',
   appendSystemPrompt: ''
 }
 

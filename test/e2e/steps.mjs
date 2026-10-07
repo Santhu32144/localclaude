@@ -185,10 +185,10 @@ export const steps = [
       await c.page("__t.click(__t.q('.session-item .more .menu-trigger'))")
       await c.menuItem('Pin')
       await c.waitFor('pinned section', "!!__t.byText('.side-section .group-label', 'Pinned')")
-      await c.page("__t.click(__t.byText('.group-row .group-label', 'Today'))")
-      await c.waitFor('Today collapsed', "__t.qa('.side-section.closed').some((s) => s.textContent.includes('Today'))")
-      await c.page("__t.click(__t.byText('.group-row .group-label', 'Today'))")
-      await c.waitFor('Today open', "!__t.qa('.side-section.closed').some((s) => s.textContent.includes('Today'))")
+      await c.page("__t.click(__t.q('.side-section[data-group] .group-label'))")
+      await c.waitFor('group collapsed', "__t.q('.side-section[data-group]').classList.contains('closed')")
+      await c.page("__t.click(__t.q('.side-section[data-group] .group-label'))")
+      await c.waitFor('group open', "!__t.q('.side-section[data-group]').classList.contains('closed')")
     }
   },
   {
@@ -638,6 +638,44 @@ export const steps = [
       await c.waitFor('named after the folder', "__t.q('.project-form input').value === 'gadget-lab'")
       await c.page("__t.click(__t.byText('.project-form .btn', 'Create project'))")
       await c.waitFor('created with its folder', "__t.text('.project-title-row h1') === 'gadget-lab' && __t.text('.project-dirs').includes('gadget-lab')")
+    }
+  },
+  {
+    name: 'the sidebar: drag to resize, chats by folder with +, your name at the bottom',
+    run: async (c) => {
+      const width = "Math.round(__t.q('.sidebar').getBoundingClientRect().width)"
+      const before = await c.page(width)
+      await c.page(`(() => {
+        const r = __t.q('.side-resizer')
+        const x = r.getBoundingClientRect().left + 2
+        r.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x, clientY: 300 }))
+        window.dispatchEvent(new MouseEvent('mousemove', { clientX: x + 120, clientY: 300 }))
+        window.dispatchEvent(new MouseEvent('mouseup', { clientX: x + 120, clientY: 300 }))
+        return true
+      })()`)
+      await c.waitFor('wider', `${width} === ${before + 120}`)
+      if ((await c.page("localStorage.getItem('sidebarWidth')")) !== String(before + 120)) throw new Error('the width should be remembered')
+      await c.shot('sidebar-wide')
+      await c.page("__t.q('.side-resizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); true")
+      await c.waitFor('back to the default width', `${width} === 272`)
+      // chats are grouped by folder or project; "+" starts a new chat there
+      await c.page(`__t.click(__t.q('.side-section[data-group*="feature-e2e-test"] .group-add'))`)
+      await c.waitFor('a new chat in that folder', "__t.text('.titlebar .pill-label') === 'feature-e2e-test' && !__t.q('.msg-user')")
+      await c.page(`__t.click(__t.q('.side-section[data-group^="project:"] .group-add'))`)
+      await c.waitFor('a new chat in the project, in its main folder', "__t.text('.titlebar .crumb').includes('E2E project') && __t.text('.titlebar .pill-label') === 'doraemon-app'")
+      await c.page("__t.click(__t.q('.group-menu .menu-trigger'))")
+      await c.menuItem('Date')
+      await c.waitFor('grouped by date', "!!__t.byText('.group-row .group-label', 'Today')")
+      await c.page("__t.click(__t.q('.group-menu .menu-trigger'))")
+      await c.menuItem('Folder and project')
+      await c.waitFor('grouped by folder again', "!__t.byText('.group-row .group-label', 'Today') && !!__t.q(`.side-section[data-group^='folder:']`)")
+      // your name and plan at the bottom
+      await c.openSettings('General')
+      // typed, then Settings closed straight away with Esc: still saved
+      await c.page(`(() => { const i = __t.q('input[name="userName"]'); i.focus(); __t.setValue(i, 'Paartha'); return true })()`)
+      await c.closeModal()
+      await c.waitFor('your name in the sidebar', "__t.text('.account-name') === 'Paartha' && __t.text('.side-account .avatar').trim() === 'P' && __t.text('.account-plan').includes('Max')")
+      await c.shot('sidebar')
     }
   }
 ]

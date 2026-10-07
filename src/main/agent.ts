@@ -252,7 +252,7 @@ class AgentSession {
         type: 'preset',
         preset: 'claude_code',
         append: systemAppend(
-          s.appendSystemPrompt,
+          [s.userName?.trim() ? `The user's name is ${s.userName.trim()}.` : '', s.appendSystemPrompt].filter(Boolean).join('\n\n'),
           project,
           this.store,
           s.memory ? { global: this.store.getGlobalMemory() } : null,

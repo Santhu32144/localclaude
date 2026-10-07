@@ -31,7 +31,7 @@ import { PasswordDialog } from './components/PasswordDialog'
 import { ProjectView, ProjectsView } from './components/Projects'
 import type { TranscriptMode } from './components/MessageView'
 import { SettingsDialog } from './components/SettingsDialog'
-import { Sidebar } from './components/Sidebar'
+import { SIDEBAR_WIDTH, Sidebar } from './components/Sidebar'
 import { Icon } from './components/Icon'
 import { Spark } from './components/Spark'
 
@@ -123,6 +123,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState<false | string>(false)
   const [transcript, setTranscriptState] = useState<TranscriptMode>(loadTranscriptMode)
   const sidebar = useSidebar()
+  const [sideWidth, setSideWidth] = useState(() => {
+    const w = Number(readPref('sidebarWidth'))
+    return w >= SIDEBAR_WIDTH.min && w <= SIDEBAR_WIDTH.max ? w : SIDEBAR_WIDTH.default
+  })
   const [page, setPage] = useState<{ kind: 'chat' } | { kind: 'projects' } | { kind: 'artifacts' } | { kind: 'project'; id: string }>({ kind: 'chat' })
   const [projects, setProjects] = useState<Project[]>([])
   const [artifacts, setArtifacts] = useState<Record<string, Artifact[]>>({})
@@ -539,6 +543,16 @@ export default function App() {
           void newChat()
           sidebar.close()
         }}
+        onNewIn={(cwd, projectId) => {
+          void newChat(cwd, projectId)
+          sidebar.close()
+        }}
+        width={sideWidth}
+        onResize={(w, done) => {
+          setSideWidth(w)
+          if (done) writePref('sidebarWidth', String(w))
+        }}
+        userName={settings.userName ?? ''}
         onDelete={(id) => void deleteChat(id)}
         onDeleteChats={(ids) => void deleteChats(ids)}
         onPinChats={(ids, p) => void pinChats(ids, p)}

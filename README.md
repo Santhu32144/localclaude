@@ -22,7 +22,7 @@ Everything runs and is stored **on this machine only**. Chats, settings and MCP 
 | Files changed | A side panel lists every file Claude edited in the chat with its diffs, open it (or in VS Code), and undo the changes |
 | Tasks, git and worktrees | Claude's task list shows above the reply box while it works. The header shows the folder's git branch and uncommitted changes; a new chat can work in its own git worktree on a new branch |
 | Memory | Claude remembers useful facts across chats, per project or globally, and you can view, edit or delete them (project page, Settings → Memory & data). Encrypted like everything else |
-| Pinning & sidebar | Pin chats and projects; Pinned, Today, Yesterday and older groups collapse like the Claude app (older months start collapsed); chats with artifacts show a file icon. Select several chats (Ctrl/Shift+click) to pin, move, export or delete them, or drag chats onto a project |
+| Pinning & sidebar | Drag the sidebar's edge to resize it. Chats are grouped by folder and project like Claude Code (with "+" to start a chat there), or by date; groups collapse. Pin chats and projects; chats with artifacts show a file icon. Select several chats (Ctrl/Shift+click) to pin, move, export or delete them, or drag chats onto a project |
 | Export & import | Export a chat as Markdown, or selected chats / a project / everything as a ZIP of Markdown chats, images, artifacts, knowledge files, instructions, memory and a context summary. Import an export back, here or on another computer (Ctrl+Shift+E to export) |
 | Backups | Password-protected backups of everything, by hand or automatically every day or week to a folder you choose (keeping the latest few). They open on any computer with your password |
 | Computer use | Optional: Claude sees your screen and uses the mouse and keyboard, like computer use in the Claude app (see below) |
@@ -43,7 +43,7 @@ Everything runs and is stored **on this machine only**. Chats, settings and MCP 
 | Response styles | Concise, Explanatory, Formal and more, per chat or as the default, plus your own |
 | Notifications & titles | A notification when Claude finishes or needs you while the app is in the background; new chats get a short AI-written title |
 | Quick access | A global shortcut (Ctrl+Alt+Space by default) brings LocalClaude forward with a new chat; the window remembers its size and place; right-click menus for copy, paste, spelling and links |
-| Personal instructions | Settings → General, appended to every chat |
+| Personal instructions | Settings → General: what Claude should call you (also shown in the sidebar), and instructions added to every chat |
 | Light / dark theme | Follows system or forced |
 
 ## Requirements

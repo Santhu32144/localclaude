@@ -1000,6 +1000,17 @@ function projectFolders() {
   console.log('✓ project folders: main folder, more folders, every chat in the project gets them, removing and replacing')
 }
 
+function yourName() {
+  const st: any = memStore()
+  st._s.settings.userName = '  Paartha '
+  const m = new SessionManager(st, () => {}, { transcriptExists: () => true })
+  const chat = m.create(process.cwd())
+  assert.match((m as any).get(chat.id).buildOptions().systemPrompt.append, /^The user's name is Paartha\./)
+  st._s.settings.userName = ''
+  assert.ok(!((m as any).get(chat.id).buildOptions().systemPrompt.append ?? '').includes("user's name"), 'not set: nothing said')
+  console.log('✓ your name: Claude is told what to call you')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -1047,6 +1058,7 @@ await knowledgeAndObsidian()
 await gitHelpers()
 await mcpServerCheck()
 projectFolders()
+yourName()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

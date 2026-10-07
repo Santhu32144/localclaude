@@ -21,17 +21,40 @@ function groupLabel(ts: number): string {
 }
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
+const folderName = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? p
 
-// Which sidebar sections are collapsed, per viewer. Older month groups start collapsed.
+/** Sidebar width: drag its edge between these; double-click the edge for the default. */
+export const SIDEBAR_WIDTH = { min: 240, max: 560, default: 272 }
+/** a folder or project group shows this many chats until you ask for more */
+const GROUP_PREVIEW = 8
+
+// A color for your avatar, the same every time for the same name.
+const AVATAR_COLORS = [
+  ['#d97757', '#b35a3c'],
+  ['#5b8def', '#3f6fd1'],
+  ['#7b5fc4', '#5e44a3'],
+  ['#2f9e7a', '#227a5e'],
+  ['#c9772b', '#a35c1c'],
+  ['#c2456a', '#9e3253']
+]
+function avatarStyle(name: string): { background: string } {
+  let h = 0
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+  const [a, b] = AVATAR_COLORS[h % AVATAR_COLORS.length]
+  return { background: `linear-gradient(135deg, ${a}, ${b})` }
+}
+
+// How the sidebar lists chats (per viewer): grouped by folder or project, or by date; collapsed groups.
 const PREFS = 'sidebar.sections'
-function loadPrefs(): { collapsed: Record<string, boolean>; hideProjectChats: boolean } {
+type Prefs = { collapsed: Record<string, boolean>; hideProjectChats: boolean; groupBy: 'folder' | 'date' }
+function loadPrefs(): Prefs {
   try {
-    return { collapsed: {}, hideProjectChats: false, ...JSON.parse(localStorage.getItem(PREFS) ?? '{}') }
+    return { collapsed: {}, hideProjectChats: false, groupBy: 'folder', ...JSON.parse(localStorage.getItem(PREFS) ?? '{}') }
   } catch {
-    return { collapsed: {}, hideProjectChats: false }
+    return { collapsed: {}, hideProjectChats: false, groupBy: 'folder' }
   }
 }
-function savePrefs(p: { collapsed: Record<string, boolean>; hideProjectChats: boolean }): void {
+function savePrefs(p: Prefs): void {
   try {
     localStorage.setItem(PREFS, JSON.stringify(p))
   } catch {
@@ -52,12 +75,12 @@ function highlight(text: string, query: string): ReactNode {
   return text.split(re).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part))
 }
 
-/** A collapsible sidebar section, like the Claude app's Pinned / Today / Yesterday groups. */
-function Section(props: { label: string; open: boolean; count: number; onToggle: () => void; extra?: ReactNode; children: ReactNode }) {
+/** A collapsible sidebar section: Pinned, a folder or project, or a date group. */
+function Section(props: { label: string; open: boolean; count: number; onToggle: () => void; extra?: ReactNode; title?: string; group?: string; children: ReactNode }) {
   return (
-    <div className={'side-section' + (props.open ? '' : ' closed')}>
+    <div className={'side-section' + (props.open ? '' : ' closed')} data-group={props.group}>
       <div className="group-row">
-        <button className="group-label" onClick={props.onToggle} aria-expanded={props.open} title={props.open ? 'Collapse' : 'Expand'}>
+        <button className="group-label" onClick={props.onToggle} aria-expanded={props.open} title={props.title ?? (props.open ? 'Collapse' : 'Expand')}>
           <span>{props.label}</span>
           {!props.open && <span className="group-count">{props.count}</span>}
           <Icon name="chevron" size={12} className={'chev-i' + (props.open ? ' open' : '')} />
@@ -69,8 +92,26 @@ function Section(props: { label: string; open: boolean; count: number; onToggle:
   )
 }
 
+/** A group of chats in the sidebar. */
+interface Group {
+  key: string
+  label: string
+  items: SessionMeta[]
+  /** folder and project groups: where "+" starts a new chat */
+  cwd?: string
+  projectId?: string
+  title?: string
+}
+
 export function Sidebar(props: {
   open: boolean
+  /** width in pixels (wide windows; drag the edge to change it) */
+  width: number
+  onResize: (width: number, done: boolean) => void
+  /** what Claude calls you, from Settings ('' = the name from your email) */
+  userName: string
+  /** "+" on a folder or project group */
+  onNewIn: (cwd: string | undefined, projectId: string | undefined) => void
   /** narrow window: slide over the chat instead of taking space */
   overlay: boolean
   onCollapse: () => void
@@ -114,6 +155,7 @@ export function Sidebar(props: {
   const [draft, setDraft] = useState('')
   const [prefs, setPrefs] = useState(loadPrefs)
   const [hits, setHits] = useState<ChatSearchHit[]>([])
+  const [showAll, setShowAll] = useState<Record<string, boolean>>({})
   const [selected, setSelected] = useState<string[]>([])
   const [selectMode, setSelectMode] = useState(false)
   const anchor = useRef<string | null>(null)
@@ -142,7 +184,8 @@ export function Sidebar(props: {
   const searching = filter.trim().length > 0
   // While searching, every section is open so nothing is hidden.
   const isOpen = (label: string): boolean => {
-    const collapsedByDefault = !RECENT.includes(label) && label !== 'Pinned'
+    // by date, older months start collapsed; folders and projects start open
+    const collapsedByDefault = prefs.groupBy === 'date' && !RECENT.includes(label) && label !== 'Pinned'
     return searching || !(prefs.collapsed[label] ?? collapsedByDefault)
   }
   const toggle = (label: string): void => update({ ...prefs, collapsed: { ...prefs.collapsed, [label]: isOpen(label) } })
@@ -152,20 +195,37 @@ export function Sidebar(props: {
     const match = (s: SessionMeta): boolean => !f || s.title.toLowerCase().includes(f) || s.cwd.toLowerCase().includes(f)
     const pinnedChats = props.sessions.filter((s) => s.pinned && match(s))
     const pinnedProjects = props.projects.filter((p) => p.pinned && (!f || p.name.toLowerCase().includes(f)))
-    const out: [string, SessionMeta[]][] = []
-    for (const s of props.sessions) {
-      if (s.pinned || !match(s)) continue
-      if (prefs.hideProjectChats && s.projectId && !f) continue
-      const g = groupLabel(s.updatedAt)
-      const last = out[out.length - 1]
-      if (last && last[0] === g) last[1].push(s)
-      else out.push([g, [s]])
+    const recent = props.sessions.filter((s) => !s.pinned && match(s) && !(prefs.hideProjectChats && s.projectId && !f)).sort((a, b) => b.updatedAt - a.updatedAt)
+    const out: Group[] = []
+    if (prefs.groupBy === 'date') {
+      for (const s of recent) {
+        const g = groupLabel(s.updatedAt)
+        const last = out[out.length - 1]
+        if (last && last.key === g) last.items.push(s)
+        else out.push({ key: g, label: g, items: [s] })
+      }
+    } else {
+      // like Claude Code: a group per folder (chats in a project go under the project), busiest first
+      const byKey = new Map<string, Group>()
+      for (const s of recent) {
+        const project = s.projectId ? props.projects.find((p) => p.id === s.projectId) : undefined
+        const key = project ? 'project:' + project.id : 'folder:' + s.cwd.replace(/\\/g, '/').toLowerCase()
+        let g = byKey.get(key)
+        if (!g) {
+          g = project
+            ? { key, label: project.name, items: [], projectId: project.id, title: `Project “${project.name}”` }
+            : { key, label: folderName(s.cwd), items: [], cwd: s.cwd, title: s.cwd }
+          byKey.set(key, g)
+          out.push(g)
+        }
+        g.items.push(s)
+      }
     }
     return { pinnedChats, pinnedProjects, groups: out }
-  }, [props.sessions, props.projects, filter, prefs.hideProjectChats])
+  }, [props.sessions, props.projects, filter, prefs.hideProjectChats, prefs.groupBy])
 
   // chats found only inside their messages (title matches are already listed above)
-  const shownIds = new Set([...pinnedChats.map((s) => s.id), ...groups.flatMap((g) => g[1].map((s) => s.id))])
+  const shownIds = new Set([...pinnedChats.map((s) => s.id), ...groups.flatMap((g) => g.items.map((s) => s.id))])
   const messageHits = searching ? hits.filter((h) => !shownIds.has(h.sessionId)) : []
 
   // selecting chats: Ctrl/Cmd+click picks one, Shift+click a range, Esc stops
@@ -185,7 +245,7 @@ export function Sidebar(props: {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [selecting])
-  const order = [...(isOpen('Pinned') ? pinnedChats : []), ...groups.filter(([label]) => isOpen(label)).flatMap(([, items]) => items)].map((s) => s.id)
+  const order = [...(isOpen('Pinned') ? pinnedChats : []), ...groups.filter((g) => isOpen(g.key)).flatMap((g) => g.items)].map((s) => s.id)
   const clickChat = (e: MouseEvent, id: string): void => {
     if (e.shiftKey && anchor.current) {
       const a = order.indexOf(anchor.current)
@@ -216,7 +276,28 @@ export function Sidebar(props: {
     }
   })
 
-  const name = props.auth.email ? props.auth.email.split('@')[0] : 'You'
+  const name = props.userName.trim() || (props.auth.email ? props.auth.email.split('@')[0] : 'You')
+
+  // drag the right edge to resize
+  const startResize = (e: MouseEvent): void => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = props.width
+    let w = startW
+    document.body.classList.add('resizing-sidebar')
+    const move = (ev: globalThis.MouseEvent): void => {
+      w = Math.round(Math.max(SIDEBAR_WIDTH.min, Math.min(SIDEBAR_WIDTH.max, window.innerWidth * 0.6, startW + ev.clientX - startX)))
+      props.onResize(w, false)
+    }
+    const up = (): void => {
+      document.body.classList.remove('resizing-sidebar')
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      props.onResize(w, true)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
   const plan = props.auth.subscriptionType ? cap(props.auth.subscriptionType) : ''
   const projectName = (id?: string): string | undefined => (id ? props.projects.find((p) => p.id === id)?.name : undefined)
 
@@ -236,7 +317,11 @@ export function Sidebar(props: {
         onDragStart={(e) => startChatDrag(e, isSel ? live : [s.id])}
         title={proj ? `${s.title}\nProject: ${proj}` : s.title}
       >
-        {selecting && <span className={'select-box' + (isSel ? ' on' : '')}>{isSel ? '✓' : ''}</span>}
+        {selecting ? (
+          <span className={'select-box' + (isSel ? ' on' : '')}>{isSel ? '✓' : ''}</span>
+        ) : (
+          <span className={'item-dot' + (busy ? ' busy' : '')} aria-hidden />
+        )}
         {editing === s.id ? (
           <input
             className="input rename"
@@ -258,8 +343,6 @@ export function Sidebar(props: {
             <span className="session-title">{s.title}</span>
             {pend ? (
               <span className="badge warn">{pend}</span>
-            ) : busy ? (
-              <span className="dot-pulse" />
             ) : s.artifactCount ? (
               <span className="item-icon" title={`${s.artifactCount} artifact${s.artifactCount === 1 ? '' : 's'}`}>
                 <Icon name="file" size={14} />
@@ -325,10 +408,13 @@ export function Sidebar(props: {
   )
 
   const viewMenu: MenuEntry[] = [
-    { key: 'select', label: 'Select chats', hint: 'Ctrl+click', onSelect: () => setSelectMode(true) },
+    { section: 'Group chats by' },
+    { key: 'by-folder', label: 'Folder and project', checked: prefs.groupBy === 'folder', onSelect: () => update({ ...prefs, groupBy: 'folder' }) },
+    { key: 'by-date', label: 'Date', checked: prefs.groupBy === 'date', onSelect: () => update({ ...prefs, groupBy: 'date' }) },
     'divider',
-    { key: 'collapse', label: 'Collapse all groups', onSelect: () => update({ ...prefs, collapsed: Object.fromEntries(['Pinned', ...groups.map((g) => g[0])].map((l) => [l, true])) }) },
-    { key: 'expand', label: 'Expand all groups', onSelect: () => update({ ...prefs, collapsed: Object.fromEntries(['Pinned', ...groups.map((g) => g[0])].map((l) => [l, false])) }) },
+    { key: 'select', label: 'Select chats', hint: 'Ctrl+click', onSelect: () => setSelectMode(true) },
+    { key: 'collapse', label: 'Collapse all groups', onSelect: () => update({ ...prefs, collapsed: { ...prefs.collapsed, ...Object.fromEntries(['Pinned', ...groups.map((g) => g.key)].map((l) => [l, true])) } }) },
+    { key: 'expand', label: 'Expand all groups', onSelect: () => update({ ...prefs, collapsed: { ...prefs.collapsed, ...Object.fromEntries(['Pinned', ...groups.map((g) => g.key)].map((l) => [l, false])) } }) },
     'divider',
     {
       key: 'hide',
@@ -340,7 +426,19 @@ export function Sidebar(props: {
   const pinnedCount = pinnedChats.length + pinnedProjects.length
 
   return (
-    <aside className={'sidebar' + (props.open ? '' : ' collapsed') + (props.overlay ? ' overlay' : '')} aria-hidden={!props.open}>
+    <aside
+      className={'sidebar' + (props.open ? '' : ' collapsed') + (props.overlay ? ' overlay' : '')}
+      aria-hidden={!props.open}
+      style={!props.overlay && props.open ? { width: props.width } : undefined}
+    >
+      {!props.overlay && props.open && (
+        <div
+          className="side-resizer"
+          onMouseDown={startResize}
+          onDoubleClick={() => props.onResize(SIDEBAR_WIDTH.default, true)}
+          title="Drag to resize · double-click for the default width"
+        />
+      )}
       <div className="side-titlebar">
         <Menu
           className="no-drag"
@@ -389,7 +487,7 @@ export function Sidebar(props: {
         Projects
       </button>
       <button className={'side-nav' + (props.artifactsActive ? ' active' : '')} onClick={props.onArtifacts}>
-        <Icon name="file" size={16} />
+        <Icon name="shapes" size={16} />
         Artifacts
       </button>
 
@@ -400,22 +498,47 @@ export function Sidebar(props: {
             {pinnedChats.map(chatItem)}
           </Section>
         )}
-        {groups.map(([label, items], i) => (
-          <Section
-            key={label}
-            label={label}
-            open={isOpen(label)}
-            count={items.length}
-            onToggle={() => toggle(label)}
-            extra={
-              i === 0 ? (
-                <Menu className="group-menu" align="right" title="View options" trigger={<Icon name="sliders" size={14} />} entries={viewMenu} />
-              ) : undefined
-            }
-          >
-            {items.map(chatItem)}
-          </Section>
-        ))}
+        {groups.map((g, i) => {
+          const all = searching || showAll[g.key] || g.items.length <= GROUP_PREVIEW
+          return (
+            <Section
+              key={g.key}
+              group={g.key}
+              label={g.label}
+              title={g.title}
+              open={isOpen(g.key)}
+              count={g.items.length}
+              onToggle={() => toggle(g.key)}
+              extra={
+                <>
+                  {(g.cwd || g.projectId) && (
+                    <button
+                      className="icon-btn group-add"
+                      title={g.projectId ? `New chat in “${g.label}”` : `New chat in ${g.title}`}
+                      onClick={() => props.onNewIn(g.projectId ? undefined : g.cwd, g.projectId)}
+                    >
+                      <Icon name="plus" size={15} />
+                    </button>
+                  )}
+                  {i === 0 && <Menu className="group-menu" align="right" title="View options" trigger={<Icon name="sliders" size={14} />} entries={viewMenu} />}
+                </>
+              }
+            >
+              {(all ? g.items : g.items.slice(0, GROUP_PREVIEW)).map(chatItem)}
+              {!searching && g.items.length > GROUP_PREVIEW && (
+                <button className="link-btn group-more" onClick={() => setShowAll((x) => ({ ...x, [g.key]: !x[g.key] }))}>
+                  {showAll[g.key] ? 'Show fewer' : `Show ${g.items.length - GROUP_PREVIEW} more`}
+                </button>
+              )}
+            </Section>
+          )
+        })}
+        {!groups.length && !pinnedCount && props.sessions.length > 0 && !searching && (
+          <div className="group-row lone-view">
+            <span className="grow" />
+            <Menu className="group-menu" align="right" title="View options" trigger={<Icon name="sliders" size={14} />} entries={viewMenu} />
+          </div>
+        )}
         {searching && messageHits.length > 0 && (
           <Section label="In messages" open count={messageHits.length} onToggle={() => {}}>
             {messageHits.map((h) => (
@@ -482,10 +605,12 @@ export function Sidebar(props: {
           direction="up"
           trigger={
             <>
-              <span className="avatar">{name.slice(0, 1).toUpperCase()}</span>
+              <span className="avatar" style={avatarStyle(name)}>
+                {name.slice(0, 1).toUpperCase()}
+              </span>
               <span className="account-name">{name}</span>
-              {plan && <span className="muted">· {plan}</span>}
-              <Icon name="chevronDown" size={14} className="muted" />
+              {plan && <span className="account-plan">· {plan}</span>}
+              <Icon name="chevronDown" size={14} className="account-chev" />
             </>
           }
           entries={[
@@ -496,8 +621,8 @@ export function Sidebar(props: {
             { key: 'signout', label: 'Sign out', onSelect: props.onSignOut }
           ]}
         />
-        <button className="icon-btn" onClick={props.onSettings} title="Settings (Ctrl+,)">
-          <Icon name="grid" size={17} />
+        <button className="icon-btn account-settings" onClick={props.onSettings} title="Settings (Ctrl+,)">
+          <Icon name="settings" size={18} />
         </button>
       </div>
     </aside>
