@@ -11,6 +11,7 @@ import type {
   ChatMessage,
   ChatSearchHit,
   ContentPart,
+  DesignInfo,
   DiffHunk,
   ImageRef,
   McpStatus,
@@ -29,6 +30,7 @@ import { resolveClaudeBinary, subscriptionEnv } from './claude'
 import { ARTIFACT_TOOLS, createArtifactServer } from './artifacts'
 import { CHAT_TOOLS, ChatIndex, createChatsServer } from './chatSearch'
 import { createComputerServer } from './computer'
+import { designPrompt } from './design'
 import { referencedImages, resultImages, storeImage } from './images'
 import { KNOWLEDGE_TOOLS, NOTE_TOOL, createKnowledgeServer, type KnowledgeIndex, type KnowledgeService } from './knowledge'
 import { activeVault } from './obsidian'
@@ -44,6 +46,8 @@ import type { SecureStore } from './store'
 
 /** forkAt value for a chat's first message: rewinding there starts a fresh transcript. */
 const FORK_START = 'start'
+/** Titles a chat has until its first message names it. */
+const NEW_TITLES = new Set(['New chat', 'New design'])
 
 /** Push-based async iterable used as the streaming prompt for query(). */
 class AsyncQueue<T> implements AsyncIterable<T> {
@@ -187,8 +191,11 @@ class AgentSession {
     if (s.loadUserSettings) sources.push('user')
     if (s.loadProjectSettings) sources.push('project', 'local')
 
+    // A design only needs LocalClaude's own tools: your MCP servers, Chrome and computer use stay out,
+    // so it starts quickly and Claude goes straight to the design.
+    const design = !!this.meta.design
     const mcpServers: Options['mcpServers'] = {}
-    for (const [name, cfg] of Object.entries(s.mcpServers)) {
+    for (const [name, cfg] of Object.entries(design ? {} : s.mcpServers)) {
       if (cfg.enabled === false) continue
       if (cfg.type === 'http' || cfg.type === 'sse') {
         mcpServers[name] = { type: cfg.type, url: cfg.url ?? '', headers: cfg.headers }
@@ -197,9 +204,11 @@ class AgentSession {
       }
     }
     // A fresh in-process server per query: an MCP server instance serves one connection.
-    if (s.computerUse) mcpServers['computer-use'] = createComputerServer()
+    if (s.computerUse && !design) mcpServers['computer-use'] = createComputerServer()
     const project = this.meta.projectId ? this.store.getProject(this.meta.projectId) : undefined
-    if (s.artifacts)
+    // a design is an artifact, so designs have the tool even when artifacts are off for chats
+    const artifacts = s.artifacts || design
+    if (artifacts)
       mcpServers['artifacts'] = createArtifactServer({
         sessionId: this.meta.id,
         store: this.store,
@@ -222,7 +231,7 @@ class AgentSession {
     if (s.chatSearch && this.deps.chatIndex)
       mcpServers['chats'] = createChatsServer({ index: this.deps.chatIndex, store: this.store, sessionId: this.meta.id, projectId: project?.id })
     // These only read or write LocalClaude's own storage, so they never need a prompt.
-    const autoAllowed = [...(s.artifacts ? ARTIFACT_TOOLS : []), ...(s.memory ? MEMORY_TOOLS : []), ...(s.chatSearch && this.deps.chatIndex ? CHAT_TOOLS : [])]
+    const autoAllowed = [...(artifacts ? ARTIFACT_TOOLS : []), ...(s.memory ? MEMORY_TOOLS : []), ...(s.chatSearch && this.deps.chatIndex ? CHAT_TOOLS : [])]
     const kb = this.knowledgeSetup(project)
     if (kb) {
       mcpServers['knowledge'] = kb.server
@@ -257,7 +266,8 @@ class AgentSession {
           this.store,
           s.memory ? { global: this.store.getGlobalMemory() } : null,
           resolveStyle(this.meta.style, s.defaultStyle, s.customStyles),
-          kb?.vault
+          kb?.vault,
+          this.meta.design ? designPrompt(this.meta.design, this.meta.cwd) : undefined
         )
       },
       allowedTools: autoAllowed.length ? autoAllowed : undefined,
@@ -265,7 +275,9 @@ class AgentSession {
       // auto-memory files and its Artifact tool (which publishes pages to claude.ai) stay off here.
       settings: { autoMemoryEnabled: false, enableArtifact: false },
       mcpServers,
-      extraArgs: s.chromeIntegration ? { chrome: null } : undefined,
+      // designs leave out the MCP servers from your Claude Code settings and plugins too
+      strictMcpConfig: design || undefined,
+      extraArgs: s.chromeIntegration && !design ? { chrome: null } : undefined,
       effort: s.effort || undefined,
       resume: this.meta.sdkSessionId,
       resumeSessionAt: this.meta.sdkSessionId ? this.meta.resumeAt : undefined,
@@ -388,7 +400,7 @@ class AgentSession {
       forkAt: this.meta.tip ?? (this.meta.sdkSessionId ? undefined : FORK_START)
     }
     this.emit({ type: 'message-start', sessionId: this.meta.id, message: userMsg })
-    if (this.meta.title === 'New chat' && p.text.trim()) {
+    if (NEW_TITLES.has(this.meta.title) && p.text.trim()) {
       this.touchMeta({ title: p.text.trim().replace(/\s+/g, ' ').slice(0, 60) })
     } else this.touchMeta({})
 
@@ -925,7 +937,9 @@ export function systemAppend(
   store: Pick<SecureStore, 'loadProjectFiles'>,
   memory: { global: MemoryItem[] } | null = null,
   style?: ResponseStyle,
-  vault?: VaultPrompt
+  vault?: VaultPrompt,
+  /** a design's instructions (see designPrompt) */
+  design?: string
 ): string | undefined {
   const parts: string[] = []
   if (personal?.trim()) parts.push(personal.trim())
@@ -964,6 +978,7 @@ export function systemAppend(
     parts.push(`<obsidian>\n${v.join(' ')}\n</obsidian>`)
   }
   if (style) parts.push(`<response_style name="${style.name}">\nThe user chose this style for your replies:\n${style.prompt.trim()}\n</response_style>`)
+  if (design) parts.push(design)
   return parts.length ? parts.join('\n\n') : undefined
 }
 
@@ -1039,12 +1054,13 @@ export class SessionManager {
     this.get(id).setStyle(style)
   }
 
-  create(cwd?: string, projectId?: string): SessionMeta {
+  create(cwd?: string, projectId?: string, design?: DesignInfo): SessionMeta {
     const st = this.store.getSettings()
     const project = projectId ? this.store.getProject(projectId) : undefined
     const meta: SessionMeta = {
       id: randomUUID(),
-      title: 'New chat',
+      title: design ? 'New design' : 'New chat',
+      design: design && { kind: design.kind, matchStyle: design.matchStyle || undefined },
       projectId: project?.id,
       cwd: cwd || project?.cwd || st.defaultCwd,
       additionalDirs: [],

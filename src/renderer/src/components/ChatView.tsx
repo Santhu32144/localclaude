@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { fenced } from '../../../shared/format'
-import { parsedInput } from '../../../shared/steps'
+import { isArtifactTool, parsedInput, type ToolPart } from '../../../shared/steps'
 import type { AppSettings, Artifact, Attachment, ChatMessage, GitStatus, ImageRef, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, RemoteState, SessionMeta } from '../../../shared/types'
 import type { SessionRuntime } from '../App'
 import { api } from '../api'
 import { allStyles } from '../../../shared/styles'
+import { designKind } from '../../../shared/design'
 import { ArtifactPanel, type PanelState } from './ArtifactPanel'
 import { ChoiceDialog } from './ChoiceDialog'
+import { DesignCanvas } from './DesignCanvas'
 import { changedFiles, FilesPanel } from './FilesPanel'
 import { FindBar } from './FindBar'
 import { Icon } from './Icon'
@@ -62,7 +64,7 @@ function baseName(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p
 }
 
-function fileToAttachment(f: File): Promise<Attachment | null> {
+export function fileToAttachment(f: File): Promise<Attachment | null> {
   return new Promise((resolve) => {
     if (!/^image\/(png|jpeg|gif|webp)$/.test(f.type) || f.size > 5 * 1024 * 1024) return resolve(null)
     const r = new FileReader()
@@ -113,8 +115,15 @@ export function ChatView(props: {
   findRequest?: { query: string; n: number } | null
   /** the find request was picked up (so it doesn't reopen in the next chat) */
   onFindHandled?: () => void
+  /** a design: back to the Design page */
+  onOpenDesigns: () => void
+  /** a design: build it in code, in a new chat */
+  onHandoff: (artifactId: string, version: number) => void
 }) {
   const { meta, history, runtime } = props
+  /** a design (from the Design page) shows its canvas beside the chat instead of the artifact panel */
+  const design = meta.design
+  const [designShown, setDesignShown] = useState<PanelState>({ id: null, version: null })
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [models, setModels] = useState(MODEL_ALIASES)
@@ -183,10 +192,20 @@ export function ChatView(props: {
   useEffect(() => {
     // (only fresh changes: reopening an old chat shouldn't pop the panel open)
     if (props.lastArtifact && Date.now() - props.lastArtifact.at < 10_000) {
+      if (design) return setDesignShown({ id: props.lastArtifact.id, version: null })
       setPanel({ id: props.lastArtifact.id, version: null })
       setFilesOpen(false)
     }
   }, [props.lastArtifact])
+  const openArtifact = (id: string): void => (design ? setDesignShown({ id, version: null }) : setPanel({ id, version: null }))
+  const fixArtifact = (title: string, error: string): void => {
+    stick.current = true
+    void api.send({
+      sessionId: meta.id,
+      text: `The “${title}” artifact shows this error when it runs:\n\n${fenced(error, 'text')}\n\nPlease fix it.`,
+      attachments: []
+    })
+  }
   const artifactInfo = (id: string) => {
     const a = props.artifacts.find((x) => x.id === id)
     return a && { title: a.title, type: a.type, versions: a.versions.length }
@@ -322,6 +341,16 @@ export function ChatView(props: {
   }
 
   const canRewind = top.some((m) => m.role === 'user' && (m.uuid || m.forkAt))
+  // a design: the artifact Claude is writing right now, which the canvas shows as it's written
+  const writing = useMemo((): ToolPart | null => {
+    if (!design || !busy) return null
+    for (let i = top.length - 1; i >= 0 && top[i].role !== 'user'; i--)
+      for (let j = top[i].parts.length - 1; j >= 0; j--) {
+        const p = top[i].parts[j]
+        if (p.kind === 'tool' && isArtifactTool(p.name)) return p.done ? null : p
+      }
+    return null
+  }, [top, busy, design])
   // Claude's task list for the reply it's working on
   const liveTodos = useMemo((): Todo[] | null => {
     if (!busy) return null
@@ -352,6 +381,23 @@ export function ChatView(props: {
   const modelLabel = meta.model ? (models.find((m) => m.value === meta.model)?.displayName ?? prettyModel(meta.model)) : prettyModel(runtime.init?.model)
   const effortLabel = EFFORTS.find((e) => e.value === props.settings.effort && e.value)?.label
 
+  const designMenu: MenuEntry[] = [
+    { key: 'rename', label: 'Rename', onSelect: () => setRenaming(meta.title) },
+    {
+      key: 'details',
+      label: props.transcript === 'verbose' ? 'Hide details' : 'Show all details',
+      hint: 'Ctrl+O',
+      onSelect: () => props.onTranscript(props.transcript === 'verbose' ? 'normal' : 'verbose')
+    },
+    { key: 'pin', label: meta.pinned ? 'Unpin' : 'Pin', onSelect: () => props.onPin(!meta.pinned) },
+    { key: 'rewind', label: 'Rewind…', hint: 'Esc Esc', disabled: !canRewind || busy, onSelect: () => setRewind({ messageId: null }) },
+    { key: 'export', label: 'Export chat…', hint: 'Markdown · Ctrl+Shift+E', onSelect: props.onExport },
+    'divider',
+    { key: 'all', label: 'All designs', onSelect: props.onOpenDesigns },
+    ...(design?.matchStyle ? [{ key: 'open', label: `Matching ${baseName(meta.cwd)}`, title: meta.cwd, hint: 'Open folder', onSelect: () => void api.openPath(meta.cwd) }] : []),
+    'divider',
+    { key: 'delete', label: 'Delete design', danger: true, onSelect: () => confirm(`Delete "${meta.title}"? This removes the design and its chat from LocalClaude.`) && props.onDelete() }
+  ]
   const titleMenu: MenuEntry[] = [
     { key: 'rename', label: 'Rename', onSelect: () => setRenaming(meta.title) },
     {
@@ -411,7 +457,14 @@ export function ChatView(props: {
     <div className="chat-shell">
       <header className="titlebar">
         {props.headerLeft}
-        {props.project && (
+        {design ? (
+          <>
+            <button className="link-btn crumb no-drag" onClick={props.onOpenDesigns} title="All designs">
+              Design
+            </button>
+            <span className="muted crumb-sep">/</span>
+          </>
+        ) : props.project && (
           <>
             <button className="link-btn crumb no-drag" onClick={() => props.onOpenProject(props.project!.id)} title={`Open project “${props.project.name}”`}>
               {props.project.name}
@@ -441,6 +494,7 @@ export function ChatView(props: {
             trigger={
               <>
                 <span className="chat-title">{meta.title}</span>
+                {design && <span className="design-kind-tag">{designKind(design.kind).label}</span>}
                 <span className="env" title={`Runs on this computer in ${meta.cwd}`}>
                   <Icon name="laptop" size={16} />
                   <span className={'env-dot' + (runtime.init ? ' on' : '')} />
@@ -448,11 +502,11 @@ export function ChatView(props: {
                 <Icon name="chevronDown" size={15} className="muted" />
               </>
             }
-            entries={titleMenu}
+            entries={design ? designMenu : titleMenu}
           />
         )}
         <div className="grow" />
-        <div className="title-actions no-drag">
+        {!design && <div className="title-actions no-drag">
           <button
             className={'icon-btn remote-btn' + (remoteOn ? ' on' : '')}
             onClick={() => setRemoteOpen(true)}
@@ -514,11 +568,11 @@ export function ChatView(props: {
             <Icon name="folder" size={15} />
             <span className="pill-label">{baseName(meta.cwd)}</span>
           </button>
-        </div>
+        </div>}
         <div className="wco-space" />
       </header>
 
-      <div className="chat-row">
+      <div className={'chat-row' + (design ? ' design-row' : '')}>
         <div
           className={'chat' + (dragOver ? ' drag' : '')}
           onDragOver={(e) => {
@@ -559,16 +613,23 @@ export function ChatView(props: {
               }}
             >
               <div className="messages-inner">
-                {top.length === 0 && (
-                  <div className="chat-empty">
-                    <Spark size={40} className="welcome-spark" />
-                    <h2>How can I help you today?</h2>
-                    <p className="muted small">
-                      Working in <code>{baseName(meta.cwd)}</code> · <code>/</code> commands · <code>@</code> files · <code>Shift+Tab</code> modes
-                      {props.settings.computerUse ? ' · computer use on' : ''}
-                    </p>
-                  </div>
-                )}
+                {top.length === 0 &&
+                  (design ? (
+                    <div className="chat-empty">
+                      <Spark size={40} className="welcome-spark" />
+                      <h2>What should we design?</h2>
+                      <p className="muted small">{designKind(design.kind).hint}. Describe it, and Claude builds it on the canvas.</p>
+                    </div>
+                  ) : (
+                    <div className="chat-empty">
+                      <Spark size={40} className="welcome-spark" />
+                      <h2>How can I help you today?</h2>
+                      <p className="muted small">
+                        Working in <code>{baseName(meta.cwd)}</code> · <code>/</code> commands · <code>@</code> files · <code>Shift+Tab</code> modes
+                        {props.settings.computerUse ? ' · computer use on' : ''}
+                      </p>
+                    </div>
+                  ))}
                 {segments.map((seg, i) => {
                   if (seg.kind === 'user')
                     return (
@@ -590,7 +651,7 @@ export function ChatView(props: {
                       live={busy && isLast}
                       mode={props.transcript}
                       artifactInfo={artifactInfo}
-                      onOpenArtifact={(id) => setPanel({ id, version: null })}
+                      onOpenArtifact={openArtifact}
                       onRetry={retryFrom ? () => void branchFrom(retryFrom.id, retryFrom.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('')) : undefined}
                       footer={busy && isLast && !props.permission ? <Working key={runtime.turnStartedAt ?? 0} since={runtime.turnStartedAt} starting={runtime.status === 'starting'} /> : undefined}
                     />
@@ -664,7 +725,9 @@ export function ChatView(props: {
                 <textarea
                   ref={taRef}
                   className="composer-input"
-                  placeholder={busy ? 'Claude is working… (Esc to stop)' : top.length ? 'Reply' : 'How can I help you today?'}
+                  placeholder={
+                    busy ? 'Claude is working… (Esc to stop)' : design ? (top.length ? 'Describe a change' : designKind(design.kind).placeholder) : top.length ? 'Reply' : 'How can I help you today?'
+                  }
                   value={text}
                   rows={1}
                   onChange={(e) => {
@@ -858,25 +921,27 @@ export function ChatView(props: {
             />
           )}
         </div>
-        {panel && (
-          <ArtifactPanel
+        {design && (
+          <DesignCanvas
             sessionId={meta.id}
+            design={design}
             artifacts={props.artifacts}
-            state={panel}
-            onState={setPanel}
-            onClose={() => setPanel(null)}
+            state={designShown}
+            onState={setDesignShown}
             busy={busy}
-            onFix={(title, error) => {
+            writing={writing}
+            onSend={(text) => {
               stick.current = true
-              void api.send({
-                sessionId: meta.id,
-                text: `The “${title}” artifact shows this error when it runs:\n\n${fenced(error, 'text')}\n\nPlease fix it.`,
-                attachments: []
-              })
+              void api.send({ sessionId: meta.id, text, attachments: [] })
             }}
+            onFix={fixArtifact}
+            onHandoff={props.onHandoff}
           />
         )}
-        {filesOpen && !panel && (
+        {panel && !design && (
+          <ArtifactPanel sessionId={meta.id} artifacts={props.artifacts} state={panel} onState={setPanel} onClose={() => setPanel(null)} busy={busy} onFix={fixArtifact} />
+        )}
+        {filesOpen && !panel && !design && (
           <FilesPanel files={files} cwd={meta.cwd} canUndo={canRewind && !busy} onUndo={() => setRewind({ messageId: null })} onClose={() => setFilesOpen(false)} />
         )}
       </div>

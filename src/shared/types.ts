@@ -108,6 +108,8 @@ export interface SessionMeta {
   style?: string
   /** where the title came from: the first message ('auto'), Claude ('ai') or you ('user') */
   titleSource?: 'auto' | 'ai' | 'user'
+  /** a design from the Design page: Claude builds it on a canvas beside the chat */
+  design?: DesignInfo
   createdAt: number
   updatedAt: number
   /** UUID of the last transcript entry of the latest finished turn (rewind fork point) */
@@ -370,6 +372,23 @@ export interface Artifact {
   versions: ArtifactVersion[]
   createdAt: number
   updatedAt: number
+}
+
+// ---------------------------------------------------------------- design
+/** What a design is; it picks Claude's instructions and how the canvas shows it. */
+export type DesignKind = 'prototype' | 'slides' | 'wireframe' | 'onepager' | 'other'
+
+export interface DesignInfo {
+  kind: DesignKind
+  /** match the look of the code in the working folder (its design system) */
+  matchStyle?: boolean
+}
+
+export interface DesignExportResult {
+  ok: boolean
+  canceled?: boolean
+  error?: string
+  path?: string
 }
 
 // ---------------------------------------------------------------- projects

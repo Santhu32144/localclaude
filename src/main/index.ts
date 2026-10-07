@@ -24,10 +24,14 @@ import {
   type RewindRequest,
   type SendPayload,
   type SessionMeta,
-  type VaultStatus
+  type VaultStatus,
+  type DesignExportResult,
+  type DesignInfo
 } from '../shared/types'
 import { SessionManager } from './agent'
 import { renderArtifactPage } from './artifacts'
+import { DRAFT_PAGE, withDesignBridge } from './design'
+import { exportDesign } from './designExport'
 import { BACKUP_EXT, MIN_PASSWORD, backupDue, backupFileName, createBackup, decryptBackup, isEncryptedBackup, writeBackupTo } from './backup'
 import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, startLogin, subscriptionEnv } from './claude'
 import { stopComputerHelper } from './computer'
@@ -220,7 +224,7 @@ function registerIpc(): void {
 
   // ---- sessions
   handle('sessions:list', () => store.listSessions())
-  handle('sessions:create', (cwd?: string, projectId?: string) => manager.create(cwd, projectId))
+  handle('sessions:create', (cwd?: string, projectId?: string, design?: DesignInfo) => manager.create(cwd, projectId, design))
   handle('sessions:delete', (id: string) => manager.delete(id))
   handle('sessions:update', (id: string, patch: Partial<Pick<SessionMeta, 'title' | 'cwd' | 'pinned' | 'projectId'>>) => manager.updateMeta(id, patch))
 
@@ -273,6 +277,40 @@ function registerIpc(): void {
     writeFileSync(file, renderArtifactPage(a.type, v.content))
     void shell.openExternal(pathToFileURL(file).href)
     return true
+  })
+
+  // ---- design
+  handle('design:export', async (sessionId: string, artifactId: string, version: number, format: 'pdf' | 'png', width: number, height?: number): Promise<DesignExportResult> => {
+    const a = store.loadArtifacts(sessionId).find((x) => x.id === artifactId)
+    const v = a?.versions[version]
+    if (!a || !v) return { ok: false, error: 'Design not found.' }
+    const r = await dialog.showSaveDialog(win!, {
+      title: format === 'pdf' ? 'Export as PDF' : 'Export as PNG',
+      defaultPath: join(app.getPath('downloads'), `${safeFileName(a.title)}.${format}`),
+      filters: [format === 'pdf' ? { name: 'PDF', extensions: ['pdf'] } : { name: 'PNG image', extensions: ['png'] }]
+    })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      const slides = store.getSession(sessionId)?.design?.kind === 'slides'
+      writeFileSync(r.filePath, await exportDesign(renderArtifactPage(a.type, v.content), { format, width: Math.round(width) || 1440, height: Math.round(height ?? 0), slides }))
+      return { ok: true, path: r.filePath }
+    } catch (e) {
+      log('warn', 'design export failed:', e)
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+  // Build a design in code: a new chat in the project's folder that can read the design's file.
+  handle('design:handoff', (sessionId: string, artifactId: string, version: number, folder: string) => {
+    const a = store.loadArtifacts(sessionId).find((x) => x.id === artifactId)
+    const v = a?.versions[version]
+    if (!a || !v) throw new Error('Design not found.')
+    const dir = join(app.getPath('temp'), 'localclaude-handoff')
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, `${safeFileName(a.title)}.${artifactExt(a)}`)
+    writeFileSync(path, v.content)
+    const meta = { ...manager.create(folder), additionalDirs: [dir] }
+    store.upsertSession(meta)
+    return { meta, path }
   })
   handle('projects:context', (id: string) => {
     const p = store.getProject(id)
@@ -590,19 +628,22 @@ function registerIpc(): void {
   })
 }
 
-/** Serves artifact previews. Each page gets its own permissive CSP (it runs in a sandboxed frame with no access to the app). */
+/**
+ * Serves artifact previews. Each page gets its own permissive CSP (it runs in a sandboxed frame with no access to the app).
+ * The design canvas asks for ?design=1, which adds comment mode to the page.
+ */
 function serveArtifacts(): void {
+  const headers = { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'" }
   protocol.handle('artifact', (req) => {
-    const [sessionId, artifactId, version] = new URL(req.url).pathname.split('/').filter(Boolean).map(decodeURIComponent)
+    const url = new URL(req.url)
+    // a design while Claude is still writing it (the canvas sends the HTML so far)
+    if (url.host === 'draft') return new Response(DRAFT_PAGE, { headers })
+    const [sessionId, artifactId, version] = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
     const a = store.lock.ok ? store.loadArtifacts(sessionId ?? '').find((x) => x.id === artifactId) : undefined
     const v = a?.versions[Number(version)] ?? a?.versions[a.versions.length - 1]
     if (!a || !v) return new Response('Artifact not found', { status: 404 })
-    return new Response(renderArtifactPage(a.type, v.content), {
-      headers: {
-        'content-type': 'text/html; charset=utf-8',
-        'content-security-policy': "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'"
-      }
-    })
+    const page = renderArtifactPage(a.type, v.content)
+    return new Response(url.searchParams.has('design') ? withDesignBridge(page) : page, { headers })
   })
 }
 

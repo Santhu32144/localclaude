@@ -143,6 +143,9 @@ export function Sidebar(props: {
   onProjects: () => void
   artifactsActive: boolean
   onArtifacts: () => void
+  /** the Design page, or a design, is open */
+  designActive: boolean
+  onDesign: () => void
   onOpenProject: (id: string) => void
   onPinProject: (id: string, pinned: boolean) => void
   onExportAll: () => void
@@ -195,7 +198,10 @@ export function Sidebar(props: {
     const match = (s: SessionMeta): boolean => !f || s.title.toLowerCase().includes(f) || s.cwd.toLowerCase().includes(f)
     const pinnedChats = props.sessions.filter((s) => s.pinned && match(s))
     const pinnedProjects = props.projects.filter((p) => p.pinned && (!f || p.name.toLowerCase().includes(f)))
-    const recent = props.sessions.filter((s) => !s.pinned && match(s) && !(prefs.hideProjectChats && s.projectId && !f)).sort((a, b) => b.updatedAt - a.updatedAt)
+    // designs live on the Design page; they show here when pinned or found by searching
+    const recent = props.sessions
+      .filter((s) => !s.pinned && match(s) && !(prefs.hideProjectChats && s.projectId && !f) && !(s.design && !f))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
     const out: Group[] = []
     if (prefs.groupBy === 'date') {
       for (const s of recent) {
@@ -343,6 +349,10 @@ export function Sidebar(props: {
             <span className="session-title">{s.title}</span>
             {pend ? (
               <span className="badge warn">{pend}</span>
+            ) : s.design ? (
+              <span className="item-icon" title="Design">
+                <Icon name="penTool" size={14} />
+              </span>
             ) : s.artifactCount ? (
               <span className="item-icon" title={`${s.artifactCount} artifact${s.artifactCount === 1 ? '' : 's'}`}>
                 <Icon name="file" size={14} />
@@ -448,6 +458,7 @@ export function Sidebar(props: {
             { key: 'new', label: 'New chat', hint: 'Ctrl+N', onSelect: props.onNew },
             { key: 'projects', label: 'Projects', onSelect: props.onProjects },
             { key: 'artifacts', label: 'Artifacts', onSelect: props.onArtifacts },
+            { key: 'design', label: 'Design', onSelect: props.onDesign },
             'divider',
             { key: 'export', label: 'Export all chats…', hint: 'Markdown + artifacts + projects, as a ZIP', onSelect: props.onExportAll },
             { key: 'import', label: 'Import an export or backup…', onSelect: props.onImport },
@@ -489,6 +500,10 @@ export function Sidebar(props: {
       <button className={'side-nav' + (props.artifactsActive ? ' active' : '')} onClick={props.onArtifacts}>
         <Icon name="shapes" size={16} />
         Artifacts
+      </button>
+      <button className={'side-nav' + (props.designActive ? ' active' : '')} onClick={props.onDesign}>
+        <Icon name="penTool" size={16} />
+        Design
       </button>
 
       <nav className="session-list">
@@ -550,7 +565,7 @@ export function Sidebar(props: {
           </Section>
         )}
         {searching && !groups.length && !pinnedCount && !messageHits.length && <div className="muted small pad">No chats match “{filter.trim()}”.</div>}
-        {!props.sessions.length && <div className="muted small pad">No chats yet.</div>}
+        {!searching && !pinnedCount && !props.sessions.some((s) => !s.design) && <div className="muted small pad">No chats yet.</div>}
         {prefs.hideProjectChats && !searching && (
           <button className="link-btn side-hint" onClick={() => update({ ...prefs, hideProjectChats: false })}>
             Chats in projects are hidden · show them

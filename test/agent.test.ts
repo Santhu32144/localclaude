@@ -3,6 +3,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { PROJECT_KNOWLEDGE_LIMIT, SessionManager, systemAppend } from '../src/main/agent'
 import { ARTIFACT_TOOLS, createArtifactServer, renderArtifactPage } from '../src/main/artifacts'
+import { designPrompt, withDesignBridge } from '../src/main/design'
+import { streamingFields } from '../src/shared/partialJson'
 import { backupDue, backupFileName, backupZip, createBackup, decryptBackup, encryptBackup, isEncryptedBackup, pruneBackups, writeBackupTo } from '../src/main/backup'
 import { buildChatsExport, buildFullExport, buildProjectExport, chatMarkdown, importBackup, importedContext, parseBackup, readBackup } from '../src/main/exporter'
 import { MEMORY_TOOLS, addMemory, createMemoryServer, editMemory, getMemory, removeMemory } from '../src/main/memory'
@@ -1014,6 +1016,71 @@ function yourName() {
   console.log('✓ your name: Claude is told what to call you')
 }
 
+function designMode() {
+  const st: any = memStore()
+  st._s.settings.artifacts = false
+  const m = new SessionManager(st, () => {}, { transcriptExists: () => true })
+  const shop = join(tmpdir(), 'lc-design-shop')
+  const d = m.create(shop, undefined, { kind: 'slides', matchStyle: true })
+  assert.equal(d.title, 'New design')
+  assert.deepEqual(d.design, { kind: 'slides', matchStyle: true })
+  // a design is an artifact: it has the tool (without prompts) even when artifacts are off for chats
+  const opts = (m as any).get(d.id).buildOptions()
+  assert.equal(opts.mcpServers.artifacts?.type, 'sdk')
+  assert.ok(ARTIFACT_TOOLS.every((t) => opts.allowedTools.includes(t)), 'the artifact tool never prompts in a design')
+  const prompt: string = opts.systemPrompt.append
+  assert.match(prompt, /<design kind="slides">/)
+  assert.match(prompt, /<section class="slide">/)
+  assert.ok(prompt.includes(`Match the product in the working folder (${shop})`), 'told to match the folder’s design system')
+  assert.match(prompt, /ONE create_artifact call/, 'written in one go, not in pieces')
+  assert.match(prompt, /visible without JavaScript/)
+  // only LocalClaude's own tools: your MCP servers, Chrome and computer use would slow it down
+  st._s.settings.mcpServers = { github: { command: 'gh-mcp' } }
+  st._s.settings.chromeIntegration = true
+  st._s.settings.computerUse = true
+  const lean = (m as any).get(d.id).buildOptions()
+  assert.equal(lean.mcpServers.github, undefined)
+  assert.equal(lean.mcpServers['computer-use'], undefined)
+  assert.equal(lean.extraArgs, undefined)
+  assert.equal(lean.strictMcpConfig, true, "MCP servers from Claude Code's settings stay out too")
+  const chat = (m as any).get(m.create(process.cwd()).id).buildOptions()
+  assert.equal(chat.mcpServers.artifacts, undefined, 'chats still follow the setting')
+  assert.ok(chat.mcpServers.github && chat.mcpServers['computer-use'] && chat.extraArgs && !chat.strictMcpConfig, 'chats keep every tool')
+  assert.ok(!(chat.systemPrompt.append ?? '').includes('<design'))
+  assert.equal(m.create(process.cwd(), undefined, { kind: 'prototype' }).design?.matchStyle, undefined)
+  // each kind has its own guidance; matching a codebase is only asked for when chosen
+  const kinds = ['prototype', 'slides', 'wireframe', 'onepager', 'other'] as const
+  const prompts = kinds.map((k) => designPrompt({ kind: k }, '/x'))
+  assert.equal(new Set(prompts).size, kinds.length)
+  assert.ok(prompts.every((p) => p.includes('update_artifact') && !p.includes('Match the product')))
+  // comment mode goes into the canvas's preview page, at the end of its body
+  const page = withDesignBridge(renderArtifactPage('html', '<html><body><h1>Hi</h1></body></html>'))
+  assert.match(page, /<h1>Hi<\/h1><script>\(function\(\)\{[\s\S]*__lcDesignPick[\s\S]*\}\)\(\)<\/script><\/body><\/html>$/)
+  assert.ok(withDesignBridge('<svg/>').startsWith('<svg/><script>'), 'no body: added at the end')
+  console.log('✓ design: own title, artifact tool and instructions per kind, only its own tools, matching a codebase, comment mode in the canvas page')
+}
+
+function streamingJson() {
+  const full = JSON.stringify({ id: 'shop', type: 'html', n: 3, opts: { a: '}', b: [1, '"'] }, title: 'Tea "Shop"', content: '<h1>Hi</h1>\n<p>Ünïcode ☕ \\ done</p>' })
+  // every cut-off point reads without throwing, and what's there so far is right
+  for (let i = 0; i <= full.length; i++) {
+    const f = streamingFields(full.slice(0, i))
+    for (const [k, v] of Object.entries(f)) {
+      const want = (JSON.parse(full) as any)[k]
+      assert.ok(want.startsWith(v.value), `${k} at ${i}: ${JSON.stringify(v.value)}`)
+      assert.equal(v.done, v.value === want && full.slice(0, i).includes(JSON.stringify(want)), `${k} done at ${i}`)
+    }
+  }
+  const f = streamingFields(full)
+  assert.deepEqual(Object.keys(f), ['id', 'type', 'title', 'content'], 'numbers and objects are skipped')
+  assert.equal(f.title.value, 'Tea "Shop"')
+  assert.equal(f.content.value, '<h1>Hi</h1>\n<p>Ünïcode ☕ \\ done</p>')
+  assert.deepEqual(streamingFields('{"id":"a","content":"<p>half\\'), { id: { value: 'a', done: true }, content: { value: '<p>half', done: false } }, 'a cut-off escape waits')
+  assert.deepEqual(streamingFields('{"x":"\\u00e'), { x: { value: '', done: false } })
+  assert.deepEqual(streamingFields(''), {})
+  console.log('✓ streaming JSON: tool input read field by field while it arrives, at every cut-off point')
+}
+
 async function remoteControl() {
   // what the real `claude remote-control` printed (captured from Claude Code 2.1.291)
   let st: RemoteState = { status: 'starting', log: [] }
@@ -1129,6 +1196,8 @@ await gitHelpers()
 await mcpServerCheck()
 projectFolders()
 yourName()
+designMode()
+streamingJson()
 await remoteControl()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
