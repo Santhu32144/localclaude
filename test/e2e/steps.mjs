@@ -660,9 +660,9 @@ export const steps = [
       await c.waitFor('back to the default width', `${width} === 272`)
       // chats are grouped by folder or project; "+" starts a new chat there
       await c.page(`__t.click(__t.q('.side-section[data-group*="feature-e2e-test"] .group-add'))`)
-      await c.waitFor('a new chat in that folder', "__t.text('.titlebar .pill-label') === 'feature-e2e-test' && !__t.q('.msg-user')")
+      await c.waitFor('a new chat in that folder', "__t.text('.titlebar .pill-btn .pill-label') === 'feature-e2e-test' && !__t.q('.msg-user')")
       await c.page(`__t.click(__t.q('.side-section[data-group^="project:"] .group-add'))`)
-      await c.waitFor('a new chat in the project, in its main folder', "__t.text('.titlebar .crumb').includes('E2E project') && __t.text('.titlebar .pill-label') === 'doraemon-app'")
+      await c.waitFor('a new chat in the project, in its main folder', "__t.text('.titlebar .crumb').includes('E2E project') && __t.text('.titlebar .pill-btn .pill-label') === 'doraemon-app'")
       await c.page("__t.click(__t.q('.group-menu .menu-trigger'))")
       await c.menuItem('Date')
       await c.waitFor('grouped by date', "!!__t.byText('.group-row .group-label', 'Today')")
