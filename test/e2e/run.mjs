@@ -15,6 +15,8 @@ process.env.LOCALCLAUDE_FAKE_AGENT = '1'
 process.env.LOCALCLAUDE_TEST_MODE = '1'
 // Obsidian's list of vaults: the steps write their own instead of reading yours
 process.env.LOCALCLAUDE_OBSIDIAN_CONFIG = join(work, 'obsidian.json')
+// Claude Code's settings (folder trust) for Remote Control: a throwaway copy, not yours
+process.env.LOCALCLAUDE_CLAUDE_CONFIG = join(work, 'claude-config.json')
 
 // File dialogs take their answers from this queue, in order.
 const answers = []

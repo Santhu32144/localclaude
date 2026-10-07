@@ -3,6 +3,9 @@
 /* drag the right edge to resize */
 .sidebar {
   position: relative;
+  /* clip, not hide: a hidden overflow can still be scrolled sideways (by focus or a wide popup),
+     which shifted everything in the sidebar to the left */
+  overflow: clip;
 }
 .side-resizer {
   position: absolute;

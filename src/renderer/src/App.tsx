@@ -16,6 +16,7 @@ import type {
   PermissionRequest,
   Project,
   RateLimitInfo,
+  RemoteState,
   SessionMeta,
   SlashCommandInfo,
   TurnStats
@@ -133,6 +134,12 @@ export default function App() {
   /** the artifact Claude touched most recently, so the chat can open it in the side panel */
   const [lastArtifact, setLastArtifact] = useState<{ sessionId: string; id: string; at: number } | null>(null)
   const [globalMemory, setGlobalMemory] = useState<MemoryItem[]>([])
+  // Remote Control (one server at a time, for any chat's folder)
+  const [remote, setRemote] = useState<RemoteState>({ status: 'off', log: [] })
+  useEffect(() => {
+    void api.remoteState().then(setRemote)
+    return api.onRemote(setRemote)
+  }, [])
   const [exportReq, setExportReq] = useState<{ scope: ExportScope; sessionId?: string; sessionIds?: string[]; projectId?: string } | null>(null)
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null)
   /** ask the open chat to show its find bar */
@@ -624,6 +631,7 @@ export default function App() {
             onOpenProject={(id) => setPage({ kind: 'project', id })}
             onMoveToProject={(pid) => void moveChat(active.id, pid)}
             onProjectChanged={upsertProject}
+            remote={remote}
             onSettings={updateSettings}
             onRename={(t) => void renameChat(active.id, t)}
             onPin={(p) => void pinChat(active.id, p)}

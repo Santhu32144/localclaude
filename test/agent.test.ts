@@ -10,6 +10,9 @@ import { createZip, readZip } from '../src/main/zip'
 import { branchName, createWorktree, gitStatus } from '../src/main/git'
 import { testMcpServer } from '../src/main/mcpCheck'
 import { addProjectDir, createProject, removeProjectDir, setProjectMainDir } from '../src/main/projects'
+import { RemoteControl, isFolderTrusted, readRemoteOutput, trustFolder } from '../src/main/remoteControl'
+import { fakeRemoteCommand } from '../src/main/fakeRemote'
+import type { RemoteState } from '../src/shared/types'
 import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { CHAT_TOOLS, ChatIndex, chatText, createChatsServer, snippet, terms } from '../src/main/chatSearch'
@@ -1011,6 +1014,73 @@ function yourName() {
   console.log('✓ your name: Claude is told what to call you')
 }
 
+async function remoteControl() {
+  // what the real `claude remote-control` printed (captured from Claude Code 2.1.291)
+  let st: RemoteState = { status: 'starting', log: [] }
+  st = readRemoteOutput(
+    st,
+    'Take this session with you and pick up right where you left off on any device.\nThe session keeps running on this machine. Use your other devices as a remote\ncontrol. Press Ctrl+C to stop.\nEnable Remote Control? (y/n) '
+  )
+  assert.equal(st.status, 'consent')
+  st = readRemoteOutput(st, '\n\x1b[2m·|·\x1b[0m Connecting · lc-rc-test · HEAD\n')
+  assert.equal(st.status, 'connecting')
+  const block = '·✔︎· Connected · lc-rc-test · HEAD\n    Single session · exits when complete\nContinue coding in the Claude mobile app or https://claude.ai/code/session_015abc\nspace to show QR code\n'
+  st = readRemoteOutput(st, block)
+  assert.equal(st.status, 'connected'); assert.equal(st.url, 'https://claude.ai/code/session_015abc'); assert.equal(st.where, 'lc-rc-test · HEAD')
+  const lines = st.log.length
+  st = readRemoteOutput(st, block)
+  assert.equal(st.log.length, lines, 'the status block it prints again on every change is kept once')
+  st = readRemoteOutput(st, '·✔︎· lc-test · lc-rc-test · HEAD\n[08:33:24] Session failed: Process exited with error cse_01\n')
+  assert.equal(st.where, 'lc-rc-test · HEAD', 'the session name takes the place of "Connected"'); assert.equal(st.problem, 'Process exited with error cse_01')
+  assert.ok(!st.log.some((l) => /space to show QR code|Press Ctrl\+C/.test(l)), 'terminal-only hints are left out')
+  assert.equal(readRemoteOutput({ status: 'starting', log: [] }, 'Error: Workspace not trusted. Please run `claude` in C:\\x first to review and accept the workspace trust dialog.\n').status, 'untrusted')
+  assert.equal(readRemoteOutput({ status: 'starting', log: [] }, 'Error: You must be logged in\n').error, 'You must be logged in')
+
+  // trusting a folder: the flag Claude Code's own prompt sets, other settings untouched
+  const dir = mkdtempSync(join(tmpdir(), 'lc-rc-'))
+  const cfg = join(dir, 'claude.json')
+  const work = join(dir, 'Work')
+  mkdirSync(join(work, 'sub'), { recursive: true })
+  writeFileSync(cfg, JSON.stringify({ numStartups: 5, projects: { 'D:/other': { hasTrustDialogAccepted: true, allowedTools: [] } } }, null, 2))
+  assert.equal(isFolderTrusted(work, cfg), false)
+  trustFolder(work, cfg)
+  const after = JSON.parse(readFileSync(cfg, 'utf8'))
+  assert.equal(after.numStartups, 5); assert.deepEqual(after.projects['D:/other'], { hasTrustDialogAccepted: true, allowedTools: [] }, 'other settings are kept')
+  const key = Object.keys(after.projects).find((k) => k.endsWith('/Work'))
+  assert.ok(key && !key.includes('\\'), 'the full path with forward slashes, the way Claude Code writes it')
+  assert.ok(isFolderTrusted(work, cfg)); assert.ok(isFolderTrusted(join(work, 'sub'), cfg), 'folders inside a trusted one count')
+  if (process.platform === 'win32') assert.ok(isFolderTrusted(work.toUpperCase(), cfg), 'Windows paths ignore case')
+
+  // the server process (a stand-in that prints what the real one prints): trust, consent, connected, stop
+  const until = async (what: string, ok: () => boolean): Promise<void> => {
+    for (let t = 0; t < 200 && !ok(); t++) await new Promise((r) => setTimeout(r, 50))
+    assert.ok(ok(), 'timed out waiting for ' + what)
+  }
+  process.env.LOCALCLAUDE_CLAUDE_CONFIG = cfg
+  const phone = join(dir, 'Phone')
+  mkdirSync(phone)
+  const seen: string[] = []
+  const rc = new RemoteControl((s) => seen.push(s.status), fakeRemoteCommand)
+  rc.start({ cwd: phone, name: 'Phone', spawn: 'same-dir' })
+  await until('the trust question', () => rc.state.status === 'untrusted')
+  rc.trustAndRetry()
+  await until('the consent question', () => rc.state.status === 'consent')
+  rc.consent(true)
+  await until('connected', () => rc.state.status === 'connected' && !!rc.state.url)
+  assert.equal(rc.state.url, 'https://claude.ai/code/session_e2eFake01'); assert.equal(rc.state.where, 'Phone · main')
+  assert.ok(seen.includes('connecting'))
+  rc.stop()
+  assert.equal(rc.state.status, 'off'); assert.equal(rc.running, false)
+  rc.start({ cwd: phone, spawn: 'session' })
+  await until('the consent question again', () => rc.state.status === 'consent')
+  rc.consent(false)
+  await until('stopped after "no"', () => rc.state.status === 'off' && !rc.running)
+  delete process.env.LOCALCLAUDE_CLAUDE_CONFIG
+  await new Promise((r) => setTimeout(r, 300))
+  rmSync(dir, { recursive: true, force: true })
+  console.log('✓ remote control: reading the server, trusting a folder, consent, connected with a link, stop')
+}
+
 function diffHelpers() {
   const lines = diffStrings('a\nb\nc', 'a\nB\nc\nd')
   assert.deepEqual(lines.map((l) => l.kind), ['ctx', 'del', 'add', 'ctx', 'add'])
@@ -1059,6 +1129,7 @@ await gitHelpers()
 await mcpServerCheck()
 projectFolders()
 yourName()
+await remoteControl()
 // The live test sends one tiny real prompt through Claude Code (uses your plan). Opt in with LOCALCLAUDE_E2E=1.
 if (process.env.LOCALCLAUDE_E2E) await realSpawn()
 else console.log('(skipping live test; set LOCALCLAUDE_E2E=1 to run it)')

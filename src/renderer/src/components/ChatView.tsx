@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { fenced } from '../../../shared/format'
 import { parsedInput } from '../../../shared/steps'
-import type { AppSettings, Artifact, Attachment, ChatMessage, GitStatus, ImageRef, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, SessionMeta } from '../../../shared/types'
+import type { AppSettings, Artifact, Attachment, ChatMessage, GitStatus, ImageRef, PermissionModeUI, PermissionRequest, Project, RateLimitInfo, RemoteState, SessionMeta } from '../../../shared/types'
 import type { SessionRuntime } from '../App'
 import { api } from '../api'
 import { allStyles } from '../../../shared/styles'
@@ -15,6 +15,7 @@ import { Menu, type MenuEntry } from './Menu'
 import { Turn, UserMessage, type TranscriptMode } from './MessageView'
 import { PermissionDialog } from './PermissionDialog'
 import { PromptDialog } from './PromptDialog'
+import { RemoteDialog } from './RemoteDialog'
 import { RewindDialog } from './RewindDialog'
 import { Spark } from './Spark'
 import { ContextRing, McpButton, Working } from './StatusWidgets'
@@ -97,6 +98,8 @@ export function ChatView(props: {
   onMoveToProject: (projectId: string | undefined) => void
   /** the chat's project changed (a folder was added to it from this chat) */
   onProjectChanged: (p: Project) => void
+  /** Remote Control, to show whether it's on */
+  remote: RemoteState
   onTranscript: (m: TranscriptMode) => void
   onPermissionDone: (requestId: string) => void
   onMeta: (m: SessionMeta) => void
@@ -129,6 +132,8 @@ export function ChatView(props: {
   const [filesOpen, setFilesOpen] = useState(false)
   const [git, setGit] = useState<GitStatus | null>(null)
   const [askWorktree, setAskWorktree] = useState(false)
+  const [remoteOpen, setRemoteOpen] = useState(false)
+  const remoteOn = props.remote.status !== 'off' && props.remote.status !== 'error'
   const images = useMemo(() => ({ sessionId: meta.id, open: (list: ImageRef[], index: number) => setLightbox({ images: list, index }) }), [meta.id])
   useEffect(() => {
     if (!props.findRequest) return
@@ -270,6 +275,12 @@ export function ChatView(props: {
 
   const send = async (): Promise<void> => {
     const t = text.trim()
+    // Claude Code can't run /remote-control here; LocalClaude runs it for you instead
+    if (/^\/remote-control\b/i.test(t)) {
+      setText('')
+      setRemoteOpen(true)
+      return
+    }
     if ((!t && !attachments.length) || busy) return
     stick.current = true
     setText('')
@@ -442,6 +453,18 @@ export function ChatView(props: {
         )}
         <div className="grow" />
         <div className="title-actions no-drag">
+          <button
+            className={'icon-btn remote-btn' + (remoteOn ? ' on' : '')}
+            onClick={() => setRemoteOpen(true)}
+            title={
+              props.remote.status === 'connected'
+                ? 'Remote Control is on: work from your phone (click for the link)'
+                : 'Remote Control: keep working from your phone or claude.ai/code'
+            }
+          >
+            <Icon name="phone" size={18} />
+            {props.remote.status === 'connected' && <span className="remote-dot" />}
+          </button>
           <button
             className={'icon-btn' + (props.settings.chromeIntegration ? ' on' : '')}
             onClick={() => void props.onSettings({ chromeIntegration: !props.settings.chromeIntegration })}
@@ -799,6 +822,9 @@ export function ChatView(props: {
               ]}
               onChoose={(v) => choice.resolve(v)}
             />
+          )}
+          {remoteOpen && (
+            <RemoteDialog cwd={meta.cwd} state={props.remote} settings={props.settings} onSettings={props.onSettings} onClose={() => setRemoteOpen(false)} />
           )}
           {askWorktree && (
             <PromptDialog

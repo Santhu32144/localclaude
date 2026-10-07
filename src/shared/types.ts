@@ -82,6 +82,9 @@ export interface AppSettings {
   obsidianFolder: string
   /** what Claude calls you (shown in the sidebar too); '' = the name from your email */
   userName: string
+  /** Remote Control: how sessions started from your phone run, and their permission mode ('' = ask) */
+  remoteSpawn: RemoteSpawn
+  remotePermissionMode: string
   /** Extra instructions appended to Claude Code's system prompt */
   appendSystemPrompt: string
 }
@@ -343,6 +346,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   obsidianSyncMemory: false,
   obsidianFolder: 'LocalClaude',
   userName: '',
+  remoteSpawn: 'same-dir',
+  remotePermissionMode: '',
   appendSystemPrompt: ''
 }
 
@@ -478,6 +483,27 @@ export interface ImportResult {
   skipped: number
   /** chats whose Claude Code transcript isn't on this machine: they continue with the old messages as context */
   withoutTranscript: number
+}
+
+// ---------------------------------------------------------------- Remote Control
+/** How the Remote Control server handles new sessions from your phone: in its folder, each in a new git worktree, or just one. */
+export type RemoteSpawn = 'same-dir' | 'worktree' | 'session'
+
+export interface RemoteState {
+  status: 'off' | 'starting' | 'consent' | 'untrusted' | 'connecting' | 'connected' | 'error'
+  cwd?: string
+  name?: string
+  spawn?: RemoteSpawn
+  /** claude.ai/code link to the session */
+  url?: string
+  /** "folder · branch", from the status line */
+  where?: string
+  error?: string
+  /** a session ended with an error (the server keeps running) */
+  problem?: string
+  /** what the server printed, each line once */
+  log: string[]
+  startedAt?: number
 }
 
 // ---------------------------------------------------------------- git

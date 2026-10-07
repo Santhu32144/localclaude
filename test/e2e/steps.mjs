@@ -677,5 +677,41 @@ export const steps = [
       await c.waitFor('your name in the sidebar', "__t.text('.account-name') === 'Paartha' && __t.text('.side-account .avatar').trim() === 'P' && __t.text('.account-plan').includes('Max')")
       await c.shot('sidebar')
     }
+  },
+  {
+    name: 'Remote Control: /remote-control opens it; trust, turn on, link and QR code, stop',
+    run: async (c) => {
+      const folder = c.file('remote-work')
+      c.mkdir(folder)
+      c.write(c.file('claude-config.json'), JSON.stringify({ numStartups: 3, projects: {} }))
+      await c.page("__t.click(__t.q('.side-new'))")
+      // the chat before was in a project: the new one is open once the project's name is gone from the top bar
+      await c.waitFor('the new chat', "!__t.q('.titlebar .crumb') && !__t.q('.msg-user')")
+      c.answers.push(folder)
+      await c.page("__t.click(__t.q('.title-menu .menu-trigger'))")
+      await c.menuItem('Change')
+      await c.waitFor('working in that folder', "__t.text('.titlebar .pill-btn .pill-label') === 'remote-work'")
+      await c.page("__t.setValue(__t.q('.composer-input'), '/remote-control'); __t.key(__t.q('.composer-input'), 'Enter')")
+      await c.waitFor('the Remote Control panel', "!!__t.q('.remote-dialog') && __t.q('.remote-dialog input').value.endsWith('remote-work')")
+      if (await c.page("!!__t.q('.msg-user')")) throw new Error('/remote-control should not go to Claude')
+      await c.page("__t.click(__t.byText('.remote-dialog .btn', 'Start Remote Control'))")
+      await c.waitFor('asks to trust the folder', "__t.text('.remote-dialog').includes('Trust this folder in Claude Code?')", 15000)
+      await c.page("__t.click(__t.byText('.remote-dialog .btn', 'Trust and start'))")
+      await c.waitFor('asks to turn it on', "__t.text('.remote-dialog').includes('Turn on Remote Control?')", 15000)
+      const cfg = JSON.parse(c.read(c.file('claude-config.json')).toString())
+      if (cfg.numStartups !== 3 || !Object.entries(cfg.projects).some(([k, v]) => k.endsWith('/remote-work') && v.hasTrustDialogAccepted)) throw new Error('the folder should be trusted, other settings kept')
+      await c.page("__t.click(__t.byText('.remote-dialog .btn', 'Turn on'))")
+      await c.waitFor('connected, with the link and a QR code', "__t.text('.remote-dialog').includes('Connected · remote-work · main') && __t.text('.remote-url') === 'https://claude.ai/code/session_e2eFake01' && !!__t.q('.remote-qr svg')", 15000)
+      await c.shot('remote-control')
+      await c.page("__t.click(__t.byText('.remote-dialog .btn', 'Open in browser'))")
+      await c.until('the link opened', () => c.opened.includes('https://claude.ai/code/session_e2eFake01'))
+      await c.page("__t.key(window, 'Escape')")
+      await c.waitFor('the phone button shows it is on', "!__t.q('.remote-dialog') && !!__t.q('.remote-btn .remote-dot')")
+      await c.page("__t.click(__t.q('.remote-btn'))")
+      await c.page("__t.click(__t.byText('.remote-dialog .btn', 'Stop Remote Control'))")
+      await c.waitFor('stopped', "__t.text('.remote-pill') === 'Off' && !__t.q('.remote-btn .remote-dot')")
+      await c.page("__t.key(window, 'Escape')")
+      await c.waitFor('closed', "!__t.q('.remote-dialog')")
+    }
   }
 ]

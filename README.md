@@ -26,6 +26,7 @@ Everything runs and is stored **on this machine only**. Chats, settings and MCP 
 | Export & import | Export a chat as Markdown, or selected chats / a project / everything as a ZIP of Markdown chats, images, artifacts, knowledge files, instructions, memory and a context summary. Import an export back, here or on another computer (Ctrl+Shift+E to export) |
 | Backups | Password-protected backups of everything, by hand or automatically every day or week to a folder you choose (keeping the latest few). They open on any computer with your password |
 | Computer use | Optional: Claude sees your screen and uses the mouse and keyboard, like computer use in the Claude app (see below) |
+| Remote Control | Keep working from your phone: the phone button in the top bar (or typing `/remote-control`) starts Claude Code's Remote Control for the chat's folder. Use it from the Code tab of the Claude mobile app or claude.ai/code; LocalClaude shows the link and a QR code, and asks Claude Code's questions (turning it on, trusting the folder) in the app |
 | Context meter | Ring in the composer shows how full the context window is, with a per-category breakdown |
 | Full Claude Code toolset | Read/edit/create files, run shell commands, search the web, fetch pages, subagents, to-do lists |
 | Permission prompts | Allow once / Always allow / Deny with a note, like the Claude app |
@@ -101,6 +102,7 @@ Anthropic currently lets the Agent SDK use your subscription's normal usage limi
 - **Your Claude account elsewhere:** these chats never reach claude.ai, so the Claude app on other devices can't see them. Claude Code's own cloud Artifact tool and its auto-memory files are turned off in LocalClaude's sessions; artifacts and memory stay in LocalClaude's encrypted storage.
 - **Backups and exports are the way out:** a backup is encrypted with your password and opens on any computer with LocalClaude. An export is plain Markdown (and JSON for the backup inside it), not encrypted, so treat the file like the chats themselves. Importing either on another computer is how you move your data; imported chats whose Claude Code transcript isn't there send their earlier messages to Claude as context on the next turn.
 - **Obsidian:** notes LocalClaude writes into your vault (chats, memory, notes Claude saves) are ordinary Markdown files there, not encrypted, so that Obsidian can read them. They're only written when you turn those options on.
+- **Remote Control:** sessions you use from your phone run on this computer, but they go through claude.ai to reach your phone, like Remote Control in Claude Code. Your LocalClaude chats aren't shared. Trusting a folder for it sets the same flag in `~/.claude.json` that Claude Code's trust prompt sets.
 - **Claude Code transcripts:** Claude Code also keeps its own plain-text session transcripts under `~/.claude/projects`, which is how chats resume. They're on this machine only, but they are not encrypted.
 - **Reinstalling the OS** changes the machine ID. The app then treats the PC as a new machine, so old chats are lost by design.
 

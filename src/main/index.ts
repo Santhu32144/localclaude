@@ -20,6 +20,7 @@ import {
   type PermissionModeUI,
   type Project,
   type ProjectArtifactRef,
+  type RemoteSpawn,
   type RewindRequest,
   type SendPayload,
   type SessionMeta,
@@ -28,13 +29,15 @@ import {
 import { SessionManager } from './agent'
 import { renderArtifactPage } from './artifacts'
 import { BACKUP_EXT, MIN_PASSWORD, backupDue, backupFileName, createBackup, decryptBackup, isEncryptedBackup, writeBackupTo } from './backup'
-import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, startLogin } from './claude'
+import { authStatus, cancelLogin, logout, resolveClaudeBinary, sendLoginInput, startLogin, subscriptionEnv } from './claude'
 import { stopComputerHelper } from './computer'
 import { attachContextMenu } from './contextMenu'
 import { createWorktree, gitStatus } from './git'
 import { testMcpServer } from './mcpCheck'
 import { IMAGE_EXT, sniffImageType, thumbnail } from './images'
 import { KnowledgeService } from './knowledge'
+import { fakeRemoteCommand } from './fakeRemote'
+import { RemoteControl } from './remoteControl'
 import { captureMainProcess, log, logFile } from './log'
 import { VaultSync, activeVault, detectVaults, obsidianUri } from './obsidian'
 import { notificationFor } from './notify'
@@ -555,6 +558,22 @@ function registerIpc(): void {
     },
     true
   )
+  // ---- Remote Control (work from your phone while Claude runs here)
+  handle('remote:state', () => remote.state)
+  handle('remote:start', (opts: { cwd: string; name?: string; spawn: RemoteSpawn; permissionMode?: string }) => {
+    log('info', `remote control: starting (${opts.spawn})`)
+    return remote.start(opts)
+  })
+  handle('remote:stop', () => {
+    log('info', 'remote control: stopped')
+    remote.stop()
+  })
+  handle('remote:consent', (yes: boolean) => remote.consent(yes))
+  handle('remote:trust', () => {
+    log('info', 'remote control: trusted a folder in Claude Code')
+    return remote.trustAndRetry()
+  })
+
   // ---- git and files Claude changed
   handle('git:status', (cwd: string): Promise<GitStatus | null> => gitStatus(cwd))
   handle('git:worktree', async (sessionId: string, name: string) => {
@@ -646,6 +665,19 @@ function scheduleBackups(): void {
   setInterval(tick, 30 * 60_000)
 }
 
+// ---- Remote Control: one Claude Code server at a time, stopped when LocalClaude quits
+const remote = new RemoteControl(
+  (s) => {
+    send('remote:changed', s)
+    if (s.status === 'error') log('warn', 'remote control:', s.error ?? '')
+  },
+  () => {
+    if (process.env.LOCALCLAUDE_FAKE_AGENT) return fakeRemoteCommand()
+    const bin = resolveClaudeBinary()
+    return bin ? { bin, args: [], env: subscriptionEnv() } : null
+  }
+)
+
 // ---- knowledge: searchable project files, linked folders and the Obsidian vault
 const knowledge = new KnowledgeService()
 let vaultSync: VaultSync
@@ -678,7 +710,9 @@ const UI_ONLY_SETTINGS = new Set<keyof AppSettings>([
   'backupEvery',
   'backupKeep',
   'obsidianSyncChats',
-  'obsidianSyncMemory'
+  'obsidianSyncMemory',
+  'remoteSpawn',
+  'remotePermissionMode'
 ])
 
 function bringToFront(): void {
@@ -769,6 +803,7 @@ app.whenReady().then(() => {
 app.on('second-instance', () => bringToFront())
 
 app.on('before-quit', () => {
+  remote.stop()
   manager?.shutdownAll()
   stopComputerHelper()
 })
